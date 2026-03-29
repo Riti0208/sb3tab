@@ -1,20 +1,8 @@
 set(SCRATCH_SRCS
     source/runtime/blockExecutor.cpp
+    # blockUtils.cpp #includes all other block .cpp files when __ESP32__ is defined
+    # to prevent --gc-sections from stripping static block registrations
     source/runtime/blocks/blockUtils.cpp
-    source/runtime/blocks/control.cpp
-    source/runtime/blocks/coreExample.cpp
-    source/runtime/blocks/data.cpp
-    source/runtime/blocks/events.cpp
-    source/runtime/blocks/looks.cpp
-    source/runtime/blocks/makeymakey.cpp
-    source/runtime/blocks/motion.cpp
-    source/runtime/blocks/operators.cpp
-    source/runtime/blocks/pen.cpp
-    source/runtime/blocks/procedures.cpp
-    source/runtime/blocks/sensing.cpp
-    source/runtime/blocks/shadow.cpp
-    source/runtime/blocks/sound.cpp
-    source/runtime/blocks/text2speech.cpp
     source/runtime/collision.cpp
     source/runtime/math.cpp
     source/runtime/parser.cpp
@@ -69,8 +57,43 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -w)
 
+# Prevent linker from stripping static block registrations (SCRATCH_BLOCK macros)
+set(BLOCK_CTORS
+    _GLOBAL__sub_I__Z17block_control_if_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z32block_coreExample_exampleOpcode_R5BlockP6Sprite
+    _GLOBAL__sub_I__Z25block_data_setvariableto_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z22block_event_broadcast_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z16block_looks_say_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z32block_makemakey_whenCodePressed_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z23block_motion_movesteps_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z19block_operator_add_R5BlockP6Sprite
+    _GLOBAL__sub_I__Z18block_pen_penDown_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z38block_argument_reporter_string_number_R5BlockP6Sprite
+    _GLOBAL__sub_I__Z25block_sensing_resettimer_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z13block_matrix_R5BlockP6Sprite
+    _GLOBAL__sub_I__Z26block_sound_playuntildone_R5BlockP6SpritePbb
+    _GLOBAL__sub_I__Z31block_text2speech_speakAndWait_R5BlockP6SpritePbb
+)
+foreach(SYM ${BLOCK_CTORS})
+    target_link_options(${COMPONENT_LIB} INTERFACE "LINKER:--undefined=${SYM}")
+endforeach()
+
+# Disable section-level GC for blockUtils.cpp (contains all block registrations via #include)
 # Force-include ScratchEverywhere's miniz.h for C++ files only
-# miniz.c compiles itself, so it doesn't need force-include
+file(GLOB_RECURSE SCRATCH_CXX_SRCS "${COMPONENT_DIR}/source/*.cpp")
+set_source_files_properties(${SCRATCH_CXX_SRCS}
+    PROPERTIES
+        COMPILE_OPTIONS "-include;${COMPONENT_DIR}/deps/miniz/miniz.h"
+        COMPILE_DEFINITIONS "MINIZ_HEADER_INCLUDED=1"
+)
+
+# blockUtils.cpp includes all block files - disable section GC to keep static registrations
+set_source_files_properties(${COMPONENT_DIR}/source/runtime/blocks/blockUtils.cpp
+    PROPERTIES
+        COMPILE_OPTIONS "-include;${COMPONENT_DIR}/deps/miniz/miniz.h;-fno-function-sections;-fno-data-sections"
+        COMPILE_DEFINITIONS "MINIZ_HEADER_INCLUDED=1"
+)
+
 set_source_files_properties(
     ${COMPONENT_DIR}/deps/miniz/miniz.c
     PROPERTIES COMPILE_DEFINITIONS "MINIZ_NO_STDIO;MINIZ_NO_TIME"
@@ -78,14 +101,6 @@ set_source_files_properties(
 set_source_files_properties(
     ${COMPONENT_DIR}/deps/ryujs/ryu/d2s.c
     PROPERTIES COMPILE_OPTIONS ""
-)
-
-# For all other source files, force-include miniz.h and block ESP-IDF's version
-file(GLOB_RECURSE SCRATCH_CXX_SRCS "${COMPONENT_DIR}/source/*.cpp")
-set_source_files_properties(${SCRATCH_CXX_SRCS}
-    PROPERTIES
-        COMPILE_OPTIONS "-include;${COMPONENT_DIR}/deps/miniz/miniz.h"
-        COMPILE_DEFINITIONS "MINIZ_HEADER_INCLUDED=1"
 )
 
 # Use ScratchEverywhere's miniz (with ZIP support) instead of ESP-IDF's (which disables ZIP)

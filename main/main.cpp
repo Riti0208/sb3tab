@@ -22,9 +22,15 @@
 #include <parser.hpp>
 #include <unzip.hpp>
 #include <render.hpp>
+#include <blockExecutor.hpp>
 #include <nlohmann/json.hpp>
 
 static const char *TAG = "scratcher";
+
+// Force linker to include blockUtils.o (which #includes all block files)
+extern BlockResult nopBlock(Block &, Sprite *, bool *, bool);
+__attribute__((used)) static auto *_force_blocks = &nopBlock;
+
 
 #define WIFI_SSID      CONFIG_WIFI_SSID
 #define WIFI_PASS      CONFIG_WIFI_PASSWORD
@@ -259,6 +265,9 @@ extern "C" void app_main(void)
                      sprite->name.c_str(), sprite->xPosition, sprite->yPosition,
                      sprite->rotation, sprite->blocks.size());
         }
+
+        ESP_LOGI(TAG, "Registered handlers: %zu", BlockExecutor::getHandlers().size());
+        ESP_LOGI(TAG, "Registered reporters: %zu", BlockExecutor::getValueHandlers().size());
 
         // Initialize and run
         ESP_LOGI(TAG, "=== Running green flag ===");

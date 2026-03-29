@@ -19,4 +19,19 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINIZ_HEADER_INCLUDED=1)
 
+# Force-keep block registration constructors
+target_link_libraries(${COMPONENT_LIB} PRIVATE
+    "-Wl,--undefined=_GLOBAL__sub_I__Z17block_control_if_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z25block_data_setvariableto_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z22block_event_broadcast_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z16block_looks_say_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z23block_motion_movesteps_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z19block_operator_add_R5BlockP6Sprite"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z18block_pen_penDown_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z38block_argument_reporter_string_number_R5BlockP6Sprite"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z25block_sensing_resettimer_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z26block_sound_playuntildone_R5BlockP6SpritePbb"
+    "-Wl,--undefined=_GLOBAL__sub_I__Z31block_text2speech_speakAndWait_R5BlockP6SpritePbb"
+)
+
 
