@@ -1,21 +1,21 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <sstream>
+#include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_log.h"
-#include "esp_http_client.h"
 #include "nvs_flash.h"
 #include "esp_psram.h"
-#include "esp_crt_bundle.h"
-#include "cJSON.h"
 #include "esp_task_wdt.h"
+#include "esp_heap_caps.h"
+#include "esp_cache.h"
+#include "driver/gpio.h"
+#include "soc/io_mux_reg.h"
+#include "soc/gpio_reg.h"
+#include "hal/usb_serial_jtag_ll.h"
 
 // ScratchEverywhere headers
 #include <runtime.hpp>
@@ -25,182 +25,353 @@
 #include <blockExecutor.hpp>
 #include <nlohmann/json.hpp>
 
+#include <audio.hpp>
+#include <renderers/headless/speech_manager_headless.hpp>
+#include <renderers/headless/headless_fb.hpp>
+#include "sw_renderer.h"
+#include "lcd_driver.h"
+
+
 static const char *TAG = "scratcher";
 
-// Force linker to include blockUtils.o (which #includes all block files)
 extern BlockResult nopBlock(Block &, Sprite *, bool *, bool);
 __attribute__((used)) static auto *_force_blocks = &nopBlock;
 
-
-#define WIFI_SSID      CONFIG_WIFI_SSID
-#define WIFI_PASS      CONFIG_WIFI_PASSWORD
-
-static EventGroupHandle_t s_wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-static int s_retry_num = 0;
-#define MAX_RETRY 5
+static volatile bool scratch_running = false;
+static SemaphoreHandle_t sprite_mutex = nullptr;
+static SWRenderer *renderer = nullptr;
+static esp_lcd_panel_handle_t lcd_panel = nullptr;
+static uint16_t *lcd_fb = nullptr;  // RGB565 framebuffer for LCD
 
 // ============================================================
-// Wi-Fi
+// USB Serial/JTAG LL API
 // ============================================================
 
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < MAX_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-        } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+static void usb_ll_write(const char *str) {
+    const uint8_t *p = (const uint8_t *)str;
+    size_t remaining = strlen(str);
+    while (remaining > 0) {
+        if (usb_serial_jtag_ll_txfifo_writable()) {
+            int written = usb_serial_jtag_ll_write_txfifo(p, remaining);
+            usb_serial_jtag_ll_txfifo_flush();
+            p += written;
+            remaining -= written;
         }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        vTaskDelay(1);
     }
 }
 
-static bool wifi_init_sta()
-{
-    s_wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    esp_event_handler_instance_t instance_any_id, instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler, NULL, &instance_got_ip));
-    wifi_config_t wifi_config = {};
-    strlcpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                            pdFALSE, pdFALSE, portMAX_DELAY);
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Wi-Fi connected to %s", WIFI_SSID);
-        return true;
+static int usb_ll_read_bulk(uint8_t *buf, size_t size, int timeout_ms) {
+    size_t received = 0;
+    TickType_t last_data = xTaskGetTickCount();
+    while (received < size) {
+        if (usb_serial_jtag_ll_rxfifo_data_available()) {
+            size_t want = size - received;
+            if (want > 64) want = 64;
+            int len = usb_serial_jtag_ll_read_rxfifo(buf + received, want);
+            if (len > 0) {
+                received += len;
+                last_data = xTaskGetTickCount();
+            }
+        }
+        vTaskDelay(1);
+        if ((xTaskGetTickCount() - last_data) > pdMS_TO_TICKS(timeout_ms)) break;
     }
-    ESP_LOGE(TAG, "Wi-Fi connection failed");
+    return received;
+}
+
+static int usb_ll_read_byte(int timeout_ms) {
+    uint8_t c;
+    return (usb_ll_read_bulk(&c, 1, timeout_ms) == 1) ? c : -1;
+}
+
+static bool usb_ll_read_line(char *buf, int max_len, int timeout_ms) {
+    int pos = 0;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (xTaskGetTickCount() < deadline) {
+        int c = usb_ll_read_byte(100);
+        if (c < 0) continue;
+        if (c == '\n' || c == '\r') {
+            if (pos > 0) { buf[pos] = '\0'; return true; }
+            continue;
+        }
+        if (pos < max_len - 1) buf[pos++] = (char)c;
+    }
+    buf[pos] = '\0';
+    return pos > 0;
+}
+
+// ============================================================
+// Protocol: receive pre-extracted project data from Python
+// Commands: JSON:<size>, ASSET:<name>:<size>, START
+// ============================================================
+
+static nlohmann::json *g_project_json = nullptr;
+
+struct AssetEntry {
+    std::string name;
+    uint8_t *data;
+    size_t len;
+};
+static std::vector<AssetEntry> g_assets;
+
+static void free_assets() {
+    for (auto &a : g_assets) {
+        if (a.data) heap_caps_free(a.data);
+    }
+    g_assets.clear();
+    if (g_project_json) { delete g_project_json; g_project_json = nullptr; }
+}
+
+static bool handle_command(const char *line) {
+    if (strncmp(line, "JSON:", 5) == 0) {
+        size_t size = atoi(line + 5);
+        if (size == 0 || size > 4 * 1024 * 1024) {
+            usb_ll_write("ERR:json size\n");
+            return false;
+        }
+        usb_ll_write("READY\n");
+
+        char *buf = (char *)heap_caps_malloc(size + 1, MALLOC_CAP_SPIRAM);
+        if (!buf) { usb_ll_write("ERR:alloc\n"); return false; }
+
+        int got = usb_ll_read_bulk((uint8_t *)buf, size, 10000);
+        if ((size_t)got != size) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "ERR:got %d/%zu\n", got, size);
+            usb_ll_write(msg);
+            heap_caps_free(buf);
+            return false;
+        }
+        buf[size] = '\0';
+
+        if (g_project_json) delete g_project_json;
+        g_project_json = new nlohmann::json();
+        try {
+            *g_project_json = nlohmann::json::parse(buf, buf + size);
+        } catch (...) {
+            usb_ll_write("ERR:json parse\n");
+            heap_caps_free(buf);
+            delete g_project_json;
+            g_project_json = nullptr;
+            return false;
+        }
+        heap_caps_free(buf);
+        usb_ll_write("OK\n");
+        return true;
+
+    } else if (strncmp(line, "ASSET:", 6) == 0) {
+        // ASSET:<name>:<size>
+        const char *name_start = line + 6;
+        const char *colon = strchr(name_start, ':');
+        if (!colon) { usb_ll_write("ERR:asset fmt\n"); return false; }
+
+        std::string name(name_start, colon - name_start);
+        size_t size = atoi(colon + 1);
+        if (size == 0 || size > 4 * 1024 * 1024) {
+            usb_ll_write("ERR:asset size\n");
+            return false;
+        }
+        usb_ll_write("READY\n");
+
+        uint8_t *buf = (uint8_t *)heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+        if (!buf) { usb_ll_write("ERR:alloc\n"); return false; }
+
+        int got = usb_ll_read_bulk(buf, size, 10000);
+        if ((size_t)got != size) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "ERR:got %d/%zu\n", got, size);
+            usb_ll_write(msg);
+            heap_caps_free(buf);
+            return false;
+        }
+
+        g_assets.push_back({name, buf, size});
+        usb_ll_write("OK\n");
+        return true;
+
+    } else if (strcmp(line, "START") == 0) {
+        return true;  // Handled by caller
+    }
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "ERR:unknown '%s'\n", line);
+    usb_ll_write(msg);
     return false;
 }
 
 // ============================================================
-// HTTP Download
+// Pen callbacks for headless renderer
 // ============================================================
 
-struct DownloadBuffer {
-    uint8_t *data;
-    size_t len;
-    size_t capacity;
-};
+extern "C" void render_set_pen_callbacks(
+    void (*)(void),
+    void (*)(void),
+    void (*)(float, float, float, float, uint8_t, uint8_t, uint8_t, uint8_t, float),
+    void (*)(float, float, uint8_t, uint8_t, uint8_t, uint8_t, float),
+    void (*)(const char *, float, float, float, float, float)
+);
 
-static esp_err_t http_event_handler(esp_http_client_event_t *evt)
-{
-    DownloadBuffer *buf = (DownloadBuffer *)evt->user_data;
-    if (evt->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
-    if (buf->len + evt->data_len > buf->capacity) {
-        size_t new_cap = buf->capacity * 2;
-        while (new_cap < buf->len + evt->data_len) new_cap *= 2;
-        if (new_cap > 4 * 1024 * 1024) new_cap = 4 * 1024 * 1024;
-        if (new_cap < buf->len + evt->data_len) return ESP_FAIL;
-        uint8_t *new_data = (uint8_t *)heap_caps_realloc(buf->data, new_cap, MALLOC_CAP_SPIRAM);
-        if (!new_data) return ESP_FAIL;
-        buf->data = new_data;
-        buf->capacity = new_cap;
-    }
-    memcpy(buf->data + buf->len, evt->data, evt->data_len);
-    buf->len += evt->data_len;
-    return ESP_OK;
+static void pen_init_cb() { if (renderer) renderer->initPenLayer(); }
+static void pen_clear_cb() { if (renderer) renderer->clearPenLayer(); }
+static void pen_line_cb(float x1, float y1, float x2, float y2,
+                        uint8_t r, uint8_t g, uint8_t b, uint8_t a, float thickness) {
+    if (renderer) renderer->penLine(x1, y1, x2, y2, r, g, b, a, thickness);
 }
-
-static DownloadBuffer http_get(const char *url)
-{
-    DownloadBuffer buf = {};
-    buf.capacity = 64 * 1024;
-    buf.data = (uint8_t *)heap_caps_malloc(buf.capacity, MALLOC_CAP_SPIRAM);
-    if (!buf.data) return buf;
-
-    esp_http_client_config_t config = {};
-    config.url = url;
-    config.event_handler = http_event_handler;
-    config.user_data = &buf;
-    config.buffer_size = 8192;
-    config.buffer_size_tx = 4096;
-    config.timeout_ms = 30000;
-    config.crt_bundle_attach = esp_crt_bundle_attach;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "HTTP %d, %zu bytes", status, buf.len);
-        if (status != 200) { heap_caps_free(buf.data); buf.data = nullptr; buf.len = 0; }
-    } else {
-        heap_caps_free(buf.data); buf.data = nullptr; buf.len = 0;
-    }
-    esp_http_client_cleanup(client);
-    return buf;
+static void pen_dot_cb(float x, float y,
+                       uint8_t r, uint8_t g, uint8_t b, uint8_t a, float thickness) {
+    if (renderer) renderer->penDot(x, y, r, g, b, a, thickness);
 }
-
-static DownloadBuffer download_project_json(const char *project_id)
-{
-    char api_url[128];
-    snprintf(api_url, sizeof(api_url), "https://api.scratch.mit.edu/projects/%s", project_id);
-    DownloadBuffer api_resp = http_get(api_url);
-    if (!api_resp.data) return api_resp;
-
-    api_resp.data[api_resp.len] = '\0';
-    cJSON *root = cJSON_Parse((char *)api_resp.data);
-    heap_caps_free(api_resp.data);
-    api_resp.data = nullptr; api_resp.len = 0;
-    if (!root) return api_resp;
-
-    cJSON *token_item = cJSON_GetObjectItem(root, "project_token");
-    if (!token_item || !cJSON_IsString(token_item)) { cJSON_Delete(root); return api_resp; }
-
-    char project_url[512];
-    snprintf(project_url, sizeof(project_url),
-             "https://projects.scratch.mit.edu/%s?token=%s",
-             project_id, token_item->valuestring);
-    cJSON_Delete(root);
-    return http_get(project_url);
+static void pen_stamp_cb(const char *costume, float x, float y,
+                         float dir, float size, float ghost) {
+    if (renderer) renderer->penStampSprite(costume, x, y, dir, size, ghost);
 }
 
 // ============================================================
-// Serial Input
+// Scratch Runtime Task
 // ============================================================
 
-static std::string read_project_id_from_serial()
+static void scratch_runtime_task(void *param)
 {
-    ESP_LOGI(TAG, "Enter Scratch project ID:");
-    char line[64] = {};
-    int pos = 0;
-    int wait_count = 0;
-    while (true) {
-        int c = fgetc(stdin);
-        if (c == EOF) {
-            if (++wait_count % 20 == 0)
-                ESP_LOGI(TAG, "Waiting for input...");
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+    while (scratch_running) {
+        xSemaphoreTake(sprite_mutex, portMAX_DELAY);
+        auto [running, restart] = Scratch::stepScratchProject();
+
+        if (renderer) {
+            // 1. Clear to white
+            renderer->clear();
+
+            // 2. Draw stage backdrop
+            if (Scratch::stageSprite) {
+                int cosIdx = Scratch::stageSprite->currentCostume;
+                if (cosIdx >= 0 && cosIdx < (int)Scratch::stageSprite->costumes.size()) {
+                    renderer->drawBackdrop(Scratch::stageSprite->costumes[cosIdx].fullName);
+                }
+            }
+
+            // 3. Composite pen layer
+            renderer->compositePenLayer();
+
+            // 4. Draw sprites (in layer order)
+            for (auto &sprite : Scratch::sprites) {
+                if (sprite->isStage || !sprite->visible) continue;
+                int cosIdx = sprite->currentCostume;
+                if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
+                const auto &cos = sprite->costumes[cosIdx];
+                renderer->drawSprite(cos.fullName,
+                                     sprite->xPosition, sprite->yPosition,
+                                     sprite->rotation, sprite->size,
+                                     sprite->visible, sprite->ghostEffect,
+                                     sprite->brightnessEffect);
+            }
+
+            // 5. Draw speech bubbles
+            SpeechManager *sm = Render::getSpeechManager();
+            if (sm) {
+                static_cast<SpeechManagerHeadless *>(sm)->renderToFramebuffer(
+                    renderer->getFramebuffer(), STAGE_W, STAGE_H,
+                    Scratch::projectWidth, Scratch::projectHeight);
+            }
+
+            // 6. Draw variable/list monitors
+            g_headless_fb.fb = renderer->getFramebuffer();
+            g_headless_fb.width = STAGE_W;
+            g_headless_fb.height = STAGE_H;
+            Render::renderMonitors();
+
+            // 7. Push framebuffer to SPI LCD (scale 480x360 → 320x240)
+            if (lcd_panel && lcd_fb) {
+                rgb888_to_rgb565_scaled(renderer->getFramebuffer(),
+                                        STAGE_W, STAGE_H,
+                                        lcd_fb, LCD_W, LCD_H);
+                lcd_draw_framebuffer(lcd_panel, lcd_fb);
+            }
         }
-        if (c == '\n' || c == '\r') { if (pos > 0) break; continue; }
-        if (pos < (int)sizeof(line) - 1) line[pos++] = (char)c;
+        xSemaphoreGive(sprite_mutex);
+
+        if (!running) break;
+        vTaskDelay(1);
     }
-    line[pos] = '\0';
-    ESP_LOGI(TAG, "Project ID: %s", line);
-    return std::string(line);
+    scratch_running = false;
+    vTaskDelete(nullptr);
+}
+
+// ============================================================
+// Load and run project
+// ============================================================
+
+static bool load_and_run()
+{
+    if (!g_project_json) {
+        usb_ll_write("ERR:no json\n");
+        return false;
+    }
+
+    if (scratch_running) {
+        scratch_running = false;
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    esp_task_wdt_deinit();
+
+    Scratch::sprites.clear();
+    SoundPlayer::cleanupAudio();
+
+    // Initialize headless renderer (creates WindowHeadless)
+    static bool render_initialized = false;
+    if (!render_initialized) {
+        Render::Init();
+        render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
+        render_initialized = true;
+    }
+
+    // Mark as UNZIPPED so runtime won't try to access zipArchive
+    Scratch::projectType = ProjectType::UNZIPPED;
+
+    usb_ll_write("LOADING\n");
+    Parser::loadSprites(*g_project_json);
+
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "SPRITES:%zu\n", Scratch::sprites.size());
+        usb_ll_write(msg);
+    }
+
+    // Load costumes and sounds from received assets
+    for (auto &sprite : Scratch::sprites) {
+        for (auto &costume : sprite->costumes) {
+            if (costume.fullName.empty()) continue;
+            for (auto &asset : g_assets) {
+                if (asset.name == costume.fullName) {
+                    renderer->loadCostumeFromMemory(costume.fullName,
+                                                     asset.data, asset.len,
+                                                     costume.rotationCenterX,
+                                                     costume.rotationCenterY);
+                    break;
+                }
+            }
+        }
+        for (auto &sound : sprite->sounds) {
+            if (sound.fullName.empty()) continue;
+            for (auto &asset : g_assets) {
+                if (asset.name == sound.fullName) {
+                    SoundPlayer::loadSoundFromMemory(sound.fullName,
+                                                      asset.data, asset.len);
+                    break;
+                }
+            }
+        }
+    }
+
+    usb_ll_write("INIT\n");
+    Scratch::turbo = true;
+    Scratch::initializeScratchProject();
+
+    scratch_running = true;
+    xTaskCreatePinnedToCore(scratch_runtime_task, "scratch_rt", 65536, nullptr, 5, nullptr, 1);
+
+    usb_ll_write("RUNNING\n");
+    return true;
 }
 
 // ============================================================
@@ -209,7 +380,7 @@ static std::string read_project_id_from_serial()
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "Scratcher - ScratchEverywhere on ESP32");
+    ESP_LOGI(TAG, "Scratcher - ScratchEverywhere on ESP32-P4");
     ESP_LOGI(TAG, "Free PSRAM: %zu bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     esp_err_t ret = nvs_flash_init();
@@ -219,90 +390,85 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    if (!wifi_init_sta()) {
-        ESP_LOGE(TAG, "Cannot proceed without Wi-Fi. Restarting...");
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        esp_restart();
+    sprite_mutex = xSemaphoreCreateMutex();
+    renderer = new SWRenderer();
+
+    lcd_fb = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
+    usb_ll_write("LCD_INIT_START\n");
+    lcd_panel = lcd_init();
+    if (lcd_panel) {
+        usb_ll_write("LCD_INIT_OK\n");
+    } else {
+        usb_ll_write("LCD_INIT_FAIL\n");
     }
 
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    char line[256];
     while (true) {
-        std::string project_id = read_project_id_from_serial();
+        usb_ll_write("WAITING\n");
+        free_assets();
 
-        ESP_LOGI(TAG, "Downloading project %s ...", project_id.c_str());
-        DownloadBuffer proj = download_project_json(project_id.c_str());
-        if (!proj.data || proj.len == 0) {
-            ESP_LOGE(TAG, "Download failed");
-            continue;
-        }
+        while (true) {
+            if (!usb_ll_read_line(line, sizeof(line), 60000)) continue;
 
-        ESP_LOGI(TAG, "Downloaded %zu bytes", proj.len);
-
-        // Parse JSON using nlohmann::json (what ScratchEverywhere uses)
-        ESP_LOGI(TAG, "Parsing with nlohmann::json...");
-        esp_task_wdt_deinit();
-
-        nlohmann::json project_json;
-        try {
-            project_json = nlohmann::json::parse((char *)proj.data, (char *)proj.data + proj.len);
-        } catch (const std::exception &e) {
-            ESP_LOGE(TAG, "JSON parse failed: %s", e.what());
-            heap_caps_free(proj.data);
-            esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = 0x3, .trigger_panic = false };
-            esp_task_wdt_init(&wdt_config);
-            continue;
-        }
-        heap_caps_free(proj.data);
-        proj.data = nullptr;
-
-        ESP_LOGI(TAG, "JSON parsed OK. Loading sprites...");
-
-        // Use ScratchEverywhere's parser to load sprites
-        Parser::loadSprites(project_json);
-
-        ESP_LOGI(TAG, "Sprites loaded: %zu", Scratch::sprites.size());
-        for (auto &sprite : Scratch::sprites) {
-            ESP_LOGI(TAG, "  %s: pos=(%.1f,%.1f) dir=%.1f blocks=%zu",
-                     sprite->name.c_str(), sprite->xPosition, sprite->yPosition,
-                     sprite->rotation, sprite->blocks.size());
-        }
-
-        ESP_LOGI(TAG, "Registered handlers: %zu", BlockExecutor::getHandlers().size());
-        ESP_LOGI(TAG, "Registered reporters: %zu", BlockExecutor::getValueHandlers().size());
-
-        // Initialize and run
-        ESP_LOGI(TAG, "=== Running green flag ===");
-        Scratch::initializeScratchProject();
-
-        // Run for a limited number of frames
-        for (int frame = 0; frame < 150; frame++) {
-            auto [running, restart] = Scratch::stepScratchProject();
-            if (!running) break;
-
-            // Log sprite positions every 30 frames
-            if (frame % 30 == 0) {
-                for (auto &sprite : Scratch::sprites) {
-                    if (!sprite->isStage) {
-                        ESP_LOGI(TAG, "  [frame %d] %s: (%.1f, %.1f) dir=%.1f",
-                                 frame, sprite->name.c_str(),
-                                 sprite->xPosition, sprite->yPosition, sprite->rotation);
-                    }
+            if (strcmp(line, "LCD") == 0) {
+                // Step-by-step LCD GPIO test
+                const gpio_num_t SCLK = GPIO_NUM_21, MOSI_PIN = GPIO_NUM_38,
+                                 CS = GPIO_NUM_19, DC = GPIO_NUM_35, RST = GPIO_NUM_37;
+                for (auto p : {SCLK, MOSI_PIN, CS, DC, RST}) {
+                    gpio_reset_pin(p);
+                    gpio_set_direction(p, GPIO_MODE_OUTPUT);
                 }
+                gpio_set_level(CS, 1);
+                gpio_set_level(SCLK, 0);
+
+                auto spi_byte = [&](uint8_t b) {
+                    for (int i = 7; i >= 0; i--) {
+                        gpio_set_level(MOSI_PIN, (b >> i) & 1);
+                        esp_rom_delay_us(100);
+                        gpio_set_level(SCLK, 1);
+                        esp_rom_delay_us(100);
+                        gpio_set_level(SCLK, 0);
+                        esp_rom_delay_us(100);
+                    }
+                };
+                auto cmd = [&](uint8_t c) {
+                    gpio_set_level(DC, 0); gpio_set_level(CS, 0);
+                    spi_byte(c);
+                    gpio_set_level(CS, 1);
+                };
+                auto dat = [&](uint8_t d) {
+                    gpio_set_level(DC, 1); gpio_set_level(CS, 0);
+                    spi_byte(d);
+                    gpio_set_level(CS, 1);
+                };
+
+                // Test 1: RST toggle - screen should flicker
+                usb_ll_write("T1:RST\n");
+                gpio_set_level(RST, 0); vTaskDelay(pdMS_TO_TICKS(500));
+                gpio_set_level(RST, 1); vTaskDelay(pdMS_TO_TICKS(500));
+                usb_ll_write("T1:DONE\n");
+
+                // Test 2: Init + display invert - white should become black
+                usb_ll_write("T2:INIT\n");
+                cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150));  // SW reset
+                cmd(0x11); vTaskDelay(pdMS_TO_TICKS(200));  // Sleep out
+                cmd(0x29); vTaskDelay(pdMS_TO_TICKS(100));  // Display ON
+                cmd(0x21); vTaskDelay(pdMS_TO_TICKS(100));  // Display INVERT
+                usb_ll_write("T2:DONE\n");
+                continue;
             }
-        }
-
-        ESP_LOGI(TAG, "=== Final state ===");
-        for (auto &sprite : Scratch::sprites) {
-            if (!sprite->isStage) {
-                ESP_LOGI(TAG, "  %s: pos=(%.1f, %.1f) dir=%.1f",
-                         sprite->name.c_str(), sprite->xPosition, sprite->yPosition, sprite->rotation);
+            if (strcmp(line, "START") == 0) {
+                load_and_run();
+                // Wait for runtime task to finish before looping back
+                while (scratch_running) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+                ESP_LOGI(TAG, "Runtime task finished, ready for next project");
+                break;
             }
+            handle_command(line);
         }
-
-        Scratch::cleanupScratchProject();
-
-        esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = 0x3, .trigger_panic = false };
-        esp_task_wdt_init(&wdt_config);
-
-        ESP_LOGI(TAG, "=== Done. Enter next project ID ===");
     }
 }

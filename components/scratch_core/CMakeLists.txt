@@ -21,8 +21,11 @@ set(SCRATCH_SRCS
     source/renderers/headless/image_headless.cpp
     source/renderers/headless/render.cpp
     source/renderers/headless/text_headless.cpp
+    source/renderers/headless/speech_text_headless.cpp
+    source/renderers/headless/speech_manager_headless.cpp
+    source/renderers/headless/headless_fb.cpp
     source/windowing/headless/input.cpp
-    source/audio/headless/audio.cpp
+    source/audio/esp32/audio.cpp
     deps/miniz/miniz.c
     deps/miniz/miniz_zip.c
     deps/miniz/miniz_tinfl.c
@@ -44,6 +47,12 @@ idf_component_register(
     REQUIRES
         newlib
         esp_rom
+        esp_timer
+        esp_driver_i2s
+        esp_http_client
+        mbedtls
+    EMBED_FILES
+        gfx/ingame/fonts/NotoSansJP-Medium-subset.ttf
 )
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
@@ -53,6 +62,8 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     __ESP32__=1
     MINIZ_NO_STDIO=1
     MINIZ_NO_TIME=1
+    NDEBUG=1
+    ENABLE_AUDIO=1
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -w)

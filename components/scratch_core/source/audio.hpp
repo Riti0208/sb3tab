@@ -20,6 +20,7 @@ class SoundPlayer {
      */
     static void startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip, const std::string &soundId, const bool &streamed = false, const bool &fromProject = true, const bool &fromCache = false);
     static bool loadSoundFromFile(Sprite *sprite, std::string fileName, const bool &streamed = false, const bool &fromCache = false);
+    static bool loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len);
     static int playSound(const std::string &soundId);
     static void setSoundVolume(const std::string &soundId, float volume);
     static float getSoundVolume(const std::string &soundId);

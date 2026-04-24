@@ -1,16 +1,16 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp"
     INCLUDE_DIRS "."
     REQUIRES
-        esp_wifi
-        esp_http_client
+        esp_lcd
+        driver
         esp_event
         nvs_flash
-        esp_netif
         esp_psram
-        mbedtls
-        json
+        hal
         scratch_core
+        esp_driver_ppa
+        esp_mm
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
@@ -33,5 +33,3 @@ target_link_libraries(${COMPONENT_LIB} PRIVATE
     "-Wl,--undefined=_GLOBAL__sub_I__Z26block_sound_playuntildone_R5BlockP6SpritePbb"
     "-Wl,--undefined=_GLOBAL__sub_I__Z31block_text2speech_speakAndWait_R5BlockP6SpritePbb"
 )
-
-
