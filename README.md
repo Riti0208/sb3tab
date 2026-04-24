@@ -1,5 +1,7 @@
 # ScratchESP
 
+[**日本語版 README はこちら**](README.ja.md)
+
 Run [Scratch](https://scratch.mit.edu/) projects (`.sb3`) natively on ESP32 microcontrollers — no browser, no PC, no internet required.
 
 Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/ScratchEverywhere), a cross-platform Scratch runtime.
