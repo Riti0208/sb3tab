@@ -321,41 +321,35 @@ static void scratch_runtime_task(void *param)
     s_spr_done = xSemaphoreCreateBinary();
     xTaskCreatePinnedToCore(render_helper_task, "render_helper", 8192, nullptr, 5, nullptr, 0);
 
+    // Kick off first clear before entering loop
+    s_helper_state.renderer = renderer;
+    s_helper_state.sprites = &Scratch::sprites;
+    xSemaphoreGive(s_render_start);
+
     while (scratch_running) {
         xSemaphoreTake(sprite_mutex, portMAX_DELAY);
-
-        s_helper_state.renderer = renderer;
-        s_helper_state.sprites = &Scratch::sprites;
-
-        // Start clear on Core 0 (parallel with step on Core 1)
-        xSemaphoreGive(s_render_start);
 
         int64_t t0 = esp_timer_get_time();
         auto [running, restart] = Scratch::stepScratchProject();
         int64_t t1 = esp_timer_get_time();
 
         if (renderer) {
-            // Wait for clear to finish
+            // Wait for clear (started at end of previous frame or initial)
             xSemaphoreTake(s_render_done, portMAX_DELAY);
-            int64_t r0 = t1;  // clear started at t0, but we measure from after step
             int64_t r1 = esp_timer_get_time();
-            int64_t r2 = r1;
 
-            // 3. Composite pen layer
+            // Composite pen layer
             renderer->compositePenLayer();
-            int64_t r3 = esp_timer_get_time();
 
-            // 4. Draw sprites split across cores
-            // Start even sprites on Core 0
+            // Draw sprites split across cores
             xSemaphoreGive(s_spr_start);
-            // Render odd sprites on Core 1
             {
                 int idx = 0;
                 for (auto &sprite : Scratch::sprites) {
                     if (sprite->isStage || !sprite->visible) continue;
                     int cosIdx = sprite->currentCostume;
                     if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
-                    if (idx % 2 == 1) {  // Odd sprites on Core 1
+                    if (idx % 2 == 1) {
                         const auto &cos = sprite->costumes[cosIdx];
                         renderer->drawSprite(cos.fullName,
                                              sprite->xPosition, sprite->yPosition,
@@ -366,29 +360,24 @@ static void scratch_runtime_task(void *param)
                     idx++;
                 }
             }
-            // Wait for Core 0 sprites
             xSemaphoreTake(s_spr_done, portMAX_DELAY);
             int64_t r4 = esp_timer_get_time();
 
-            // 5. Draw speech bubbles
+            // Speech bubbles
             SpeechManager *sm = Render::getSpeechManager();
             if (sm) {
                 static_cast<SpeechManagerHeadless *>(sm)->renderToFramebuffer(
                     renderer->getFramebuffer(), STAGE_W, STAGE_H,
                     Scratch::projectWidth, Scratch::projectHeight);
             }
-            int64_t r5 = esp_timer_get_time();
 
-            // 6. Draw variable/list monitors
+            // Variable/list monitors
             g_headless_fb.fb = renderer->getFramebuffer();
             g_headless_fb.width = STAGE_W;
             g_headless_fb.height = STAGE_H;
             Render::renderMonitors();
-            int64_t r6 = esp_timer_get_time();
 
-            int64_t t2 = r6;
-
-            // 7. Swap framebuffer and push completed frame to display
+            // Swap framebuffer and push to display
 #if USE_DSI_DISPLAY
             if (dsi_panel) {
                 uint8_t *completedFb = renderer->swapFramebuffer();
@@ -402,30 +391,21 @@ static void scratch_runtime_task(void *param)
                 lcd_draw_framebuffer(lcd_panel, lcd_fb);
             }
 #endif
-
             int64_t t3 = esp_timer_get_time();
 
-            s_total_step += (t1 - t0);
-            s_total_render += (t2 - t1);
-            s_total_lcd += (t3 - t2);
+            // Start NEXT frame's clear immediately (pipelined: runs during vTaskDelay + next step)
+            xSemaphoreGive(s_render_start);
+
             s_frame_count++;
-
-            // Detailed render breakdown accumulators
-            static int64_t s_r_clear=0, s_r_bg=0, s_r_pen=0, s_r_spr=0, s_r_speech=0, s_r_mon=0;
-            s_r_clear += (r1-r0); s_r_bg += (r2-r1); s_r_pen += (r3-r2);
-            s_r_spr += (r4-r3); s_r_speech += (r5-r4); s_r_mon += (r6-r5);
-
-            if (s_frame_count % 60 == 0) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
-                    "step:%lld clr:%lld bg:%lld pen:%lld spr:%lld say:%lld mon:%lld lcd:%lld\n",
-                    s_total_step/60,
-                    s_r_clear/60, s_r_bg/60, s_r_pen/60,
-                    s_r_spr/60, s_r_speech/60, s_r_mon/60,
-                    s_total_lcd/60);
+            if (s_frame_count % 120 == 0) {
+                int64_t frame_us = t3 - t0;
+                int64_t step_us = t1 - t0;
+                int64_t wait_us = r1 - t1;
+                int64_t spr_us = r4 - r1;
+                char msg[128];
+                snprintf(msg, sizeof(msg), "frame:%lld step:%lld wait:%lld spr:%lld fps:%.1f\n",
+                         frame_us, step_us, wait_us, spr_us, 1000000.0f / frame_us);
                 usb_ll_write(msg);
-                s_total_step = s_total_render = s_total_lcd = 0;
-                s_r_clear = s_r_bg = s_r_pen = s_r_spr = s_r_speech = s_r_mon = 0;
             }
         }
         xSemaphoreGive(sprite_mutex);
