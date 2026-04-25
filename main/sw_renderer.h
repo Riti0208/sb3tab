@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
 #include <unordered_map>
 #include "esp_http_client.h"
 
@@ -31,8 +32,12 @@ public:
     bool loadCostumeFromMemory(const std::string &name, const uint8_t *data, size_t len,
                                 double rotCenterX, double rotCenterY);
 
-    // Clear framebuffer to white
+    // Clear framebuffer to white (full clear)
     void clear();
+
+    // Clear only dirty rects from previous frame (for white backdrop)
+    // Returns false if full clear is needed (first frame or too many dirty rects)
+    bool clearDirty();
 
     // Draw a sprite onto the framebuffer
     void drawSprite(const std::string &costumeMd5ext, float x, float y,
@@ -58,16 +63,34 @@ public:
     void penStampSprite(const std::string &costumeMd5ext, float x, float y,
                         float direction, float size, float ghostEffect);
 
+    // Get costume dimensions (returns false if not found)
+    bool getCostumeSize(const std::string &name, int &w, int &h) const;
+
     // Encode framebuffer as JPEG, returns malloc'd buffer (caller must free)
     uint8_t *encodeJpeg(int quality, int *outSize);
 
-    // Get raw framebuffer
-    uint8_t *getFramebuffer() { return fb; }
+    // Get raw framebuffer (current draw target)
+    uint8_t *getFramebuffer() { return fb[currentFb]; }
+
+    // Swap framebuffers: returns the completed frame's buffer for display
+    uint8_t *swapFramebuffer() {
+        uint8_t *completed = fb[currentFb];
+        currentFb ^= 1;
+        return completed;
+    }
+
+    // Notify a dirty region was drawn (called internally and by external renderers)
+    void addDirtyRect(int x, int y, int w, int h);
 
 private:
-    uint8_t *fb;      // STAGE_W * STAGE_H * 3 (RGB888)
+    uint8_t *fb[2];   // Double-buffered STAGE_W * STAGE_H * 3 (RGB888)
+    int currentFb = 0;
     uint8_t *penFb;   // STAGE_W * STAGE_H * 4 (RGBA8888) pen layer
     std::unordered_map<std::string, CostumePixels> costumes;
+
+    struct DirtyRect { int16_t x, y, w, h; };
+    std::vector<DirtyRect> dirtyRects[2];  // per framebuffer
+    bool needFullClear[2] = {true, true};
 
     void blitRGBA(const CostumePixels &cos, int dstX, int dstY,
                   float scale, float angleDeg, float alpha,

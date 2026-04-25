@@ -539,6 +539,12 @@ void Scratch::sortSprites() {
         sprite->layer = currentLayer--;
 }
 
+// Weak symbol: headless renderer can override to provide costume sizes from SWRenderer
+extern "C" __attribute__((weak)) bool render_get_costume_size(const char *name, int *w, int *h) {
+    (void)name; (void)w; (void)h;
+    return false;
+}
+
 void Scratch::loadCurrentCostumeImage(Sprite *sprite) {
     const std::string &costumeName = sprite->costumes[sprite->currentCostume].fullName;
 
@@ -546,6 +552,14 @@ void Scratch::loadCurrentCostumeImage(Sprite *sprite) {
     if (it != costumeImages.end()) {
         sprite->spriteWidth = it->second->getWidth();
         sprite->spriteHeight = it->second->getHeight();
+        return;
+    }
+
+    // Try external costume size callback (headless/ESP32 path)
+    int cw, ch;
+    if (render_get_costume_size(costumeName.c_str(), &cw, &ch)) {
+        sprite->spriteWidth = cw;
+        sprite->spriteHeight = ch;
         return;
     }
 

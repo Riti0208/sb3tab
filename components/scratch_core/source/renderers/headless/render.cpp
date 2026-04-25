@@ -10,6 +10,21 @@
 Window *globalWindow = nullptr;
 static SpeechManagerHeadless *speechManager = nullptr;
 
+// Costume size callback (set by main.cpp for collision/bounce)
+static bool (*s_costume_size_cb)(const char *name, int *w, int *h) = nullptr;
+
+extern "C" void render_set_costume_size_callback(
+    bool (*cb)(const char *name, int *w, int *h)
+) {
+    s_costume_size_cb = cb;
+}
+
+// Called by runtime when costumeImages lookup fails
+extern "C" bool render_get_costume_size(const char *name, int *w, int *h) {
+    if (s_costume_size_cb) return s_costume_size_cb(name, w, h);
+    return false;
+}
+
 // Pen layer callbacks (set by main.cpp)
 struct PenCallbacks {
     void (*init)() = nullptr;

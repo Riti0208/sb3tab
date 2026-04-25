@@ -222,6 +222,9 @@ extern "C" void render_set_pen_callbacks(
     void (*)(float, float, uint8_t, uint8_t, uint8_t, uint8_t, float),
     void (*)(const char *, float, float, float, float, float)
 );
+extern "C" void render_set_costume_size_callback(
+    bool (*)(const char *name, int *w, int *h)
+);
 
 static void pen_init_cb() { if (renderer) renderer->initPenLayer(); }
 static void pen_clear_cb() { if (renderer) renderer->clearPenLayer(); }
@@ -237,9 +240,73 @@ static void pen_stamp_cb(const char *costume, float x, float y,
                          float dir, float size, float ghost) {
     if (renderer) renderer->penStampSprite(costume, x, y, dir, size, ghost);
 }
+static bool costume_size_cb(const char *name, int *w, int *h) {
+    if (renderer) return renderer->getCostumeSize(name, *w, *h);
+    return false;
+}
 
 // ============================================================
-// Scratch Runtime Task
+// Dual-core render helper (Core 0)
+// ============================================================
+
+static SemaphoreHandle_t s_render_start = NULL;  // Main → Helper: start work
+static SemaphoreHandle_t s_render_done = NULL;   // Helper → Main: work complete
+static SemaphoreHandle_t s_spr_start = NULL;     // Main → Helper: start sprite rendering
+static SemaphoreHandle_t s_spr_done = NULL;      // Helper → Main: sprites done
+
+// Shared state for helper task
+struct RenderHelperState {
+    SWRenderer *renderer;
+    std::vector<Sprite *> *sprites;
+    int phase;  // 0=clear, 1=sprites
+};
+static RenderHelperState s_helper_state;
+
+static void render_helper_task(void *param) {
+    while (true) {
+        // Phase 1: Clear framebuffer (parallel with step on Core 1)
+        xSemaphoreTake(s_render_start, portMAX_DELAY);
+        if (s_helper_state.renderer) {
+            bool cleared = false;
+            if (Scratch::stageSprite) {
+                int cosIdx = Scratch::stageSprite->currentCostume;
+                if (cosIdx >= 0 && cosIdx < (int)Scratch::stageSprite->costumes.size()) {
+                    cleared = s_helper_state.renderer->clearDirty();
+                    if (!cleared) {
+                        cleared = s_helper_state.renderer->drawBackdropFull(
+                            Scratch::stageSprite->costumes[cosIdx].fullName);
+                    }
+                }
+            }
+            if (!cleared) s_helper_state.renderer->clear();
+        }
+        xSemaphoreGive(s_render_done);
+
+        // Phase 2: Render even-indexed sprites (parallel with odd on Core 1)
+        xSemaphoreTake(s_spr_start, portMAX_DELAY);
+        if (s_helper_state.renderer && s_helper_state.sprites) {
+            int idx = 0;
+            for (auto &sprite : *s_helper_state.sprites) {
+                if (sprite->isStage || !sprite->visible) continue;
+                int cosIdx = sprite->currentCostume;
+                if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
+                if (idx % 2 == 0) {  // Even sprites on Core 0
+                    const auto &cos = sprite->costumes[cosIdx];
+                    s_helper_state.renderer->drawSprite(cos.fullName,
+                        sprite->xPosition, sprite->yPosition,
+                        sprite->rotation, sprite->size,
+                        sprite->visible, sprite->ghostEffect,
+                        sprite->brightnessEffect);
+                }
+                idx++;
+            }
+        }
+        xSemaphoreGive(s_spr_done);
+    }
+}
+
+// ============================================================
+// Scratch Runtime Task (Core 1)
 // ============================================================
 
 static int s_frame_count = 0;
@@ -247,47 +314,60 @@ static int64_t s_total_step = 0, s_total_render = 0, s_total_lcd = 0;
 
 static void scratch_runtime_task(void *param)
 {
+    // Create render helper on Core 0
+    s_render_start = xSemaphoreCreateBinary();
+    s_render_done = xSemaphoreCreateBinary();
+    s_spr_start = xSemaphoreCreateBinary();
+    s_spr_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(render_helper_task, "render_helper", 8192, nullptr, 5, nullptr, 0);
+
     while (scratch_running) {
         xSemaphoreTake(sprite_mutex, portMAX_DELAY);
+
+        s_helper_state.renderer = renderer;
+        s_helper_state.sprites = &Scratch::sprites;
+
+        // Start clear on Core 0 (parallel with step on Core 1)
+        xSemaphoreGive(s_render_start);
 
         int64_t t0 = esp_timer_get_time();
         auto [running, restart] = Scratch::stepScratchProject();
         int64_t t1 = esp_timer_get_time();
 
         if (renderer) {
-            int64_t r0 = esp_timer_get_time();
-
-            // 1+2. Draw backdrop directly (or clear to white if no backdrop)
-            {
-                bool drewBackdrop = false;
-                if (Scratch::stageSprite) {
-                    int cosIdx = Scratch::stageSprite->currentCostume;
-                    if (cosIdx >= 0 && cosIdx < (int)Scratch::stageSprite->costumes.size()) {
-                        drewBackdrop = renderer->drawBackdropFull(
-                            Scratch::stageSprite->costumes[cosIdx].fullName);
-                    }
-                }
-                if (!drewBackdrop) renderer->clear();
-            }
+            // Wait for clear to finish
+            xSemaphoreTake(s_render_done, portMAX_DELAY);
+            int64_t r0 = t1;  // clear started at t0, but we measure from after step
             int64_t r1 = esp_timer_get_time();
-            int64_t r2 = r1; // backdrop merged into clear
+            int64_t r2 = r1;
 
             // 3. Composite pen layer
             renderer->compositePenLayer();
             int64_t r3 = esp_timer_get_time();
 
-            // 4. Draw sprites (in layer order)
-            for (auto &sprite : Scratch::sprites) {
-                if (sprite->isStage || !sprite->visible) continue;
-                int cosIdx = sprite->currentCostume;
-                if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
-                const auto &cos = sprite->costumes[cosIdx];
-                renderer->drawSprite(cos.fullName,
-                                     sprite->xPosition, sprite->yPosition,
-                                     sprite->rotation, sprite->size,
-                                     sprite->visible, sprite->ghostEffect,
-                                     sprite->brightnessEffect);
+            // 4. Draw sprites split across cores
+            // Start even sprites on Core 0
+            xSemaphoreGive(s_spr_start);
+            // Render odd sprites on Core 1
+            {
+                int idx = 0;
+                for (auto &sprite : Scratch::sprites) {
+                    if (sprite->isStage || !sprite->visible) continue;
+                    int cosIdx = sprite->currentCostume;
+                    if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
+                    if (idx % 2 == 1) {  // Odd sprites on Core 1
+                        const auto &cos = sprite->costumes[cosIdx];
+                        renderer->drawSprite(cos.fullName,
+                                             sprite->xPosition, sprite->yPosition,
+                                             sprite->rotation, sprite->size,
+                                             sprite->visible, sprite->ghostEffect,
+                                             sprite->brightnessEffect);
+                    }
+                    idx++;
+                }
             }
+            // Wait for Core 0 sprites
+            xSemaphoreTake(s_spr_done, portMAX_DELAY);
             int64_t r4 = esp_timer_get_time();
 
             // 5. Draw speech bubbles
@@ -308,10 +388,11 @@ static void scratch_runtime_task(void *param)
 
             int64_t t2 = r6;
 
-            // 7. Push framebuffer to display
+            // 7. Swap framebuffer and push completed frame to display
 #if USE_DSI_DISPLAY
             if (dsi_panel) {
-                dsi_display_update(dsi_panel, renderer->getFramebuffer(), STAGE_W, STAGE_H);
+                uint8_t *completedFb = renderer->swapFramebuffer();
+                dsi_display_update(dsi_panel, completedFb, STAGE_W, STAGE_H);
             }
 #else
             if (lcd_panel && lcd_fb) {
@@ -382,6 +463,7 @@ static bool load_and_run()
     if (!render_initialized) {
         Render::Init();
         render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
+        render_set_costume_size_callback(costume_size_cb);
         render_initialized = true;
     }
 
@@ -407,6 +489,12 @@ static bool load_and_run()
                                                      asset.data, asset.len,
                                                      costume.rotationCenterX,
                                                      costume.rotationCenterY);
+                    // Set sprite dimensions for collision/bounce detection
+                    int cw, ch;
+                    if (renderer->getCostumeSize(costume.fullName, cw, ch)) {
+                        sprite->spriteWidth = cw;
+                        sprite->spriteHeight = ch;
+                    }
                     break;
                 }
             }
@@ -425,6 +513,7 @@ static bool load_and_run()
 
     usb_ll_write("INIT\n");
     Scratch::turbo = true;
+    Scratch::accurateCollision = false;  // No bitmask images on headless; use fast AABB collision
     Scratch::initializeScratchProject();
 
     scratch_running = true;

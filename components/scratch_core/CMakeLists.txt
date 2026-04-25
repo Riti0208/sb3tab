@@ -63,7 +63,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     MINIZ_NO_STDIO=1
     MINIZ_NO_TIME=1
     NDEBUG=1
-    ENABLE_AUDIO=1
+    # ENABLE_AUDIO=1
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -w)

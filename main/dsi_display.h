@@ -26,5 +26,6 @@
 esp_lcd_panel_handle_t dsi_display_init();
 
 // Push Scratch framebuffer (480x360 RGB888) scaled to 720x540 centered on display
+// With double buffering: scratch_fb must remain valid until next call (PPA reads async)
 void dsi_display_update(esp_lcd_panel_handle_t panel,
                         const uint8_t *scratch_fb, int src_w, int src_h);

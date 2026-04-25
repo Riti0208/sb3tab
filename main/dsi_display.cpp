@@ -349,18 +349,19 @@ esp_lcd_panel_handle_t dsi_display_init()
 void dsi_display_update(esp_lcd_panel_handle_t panel,
                         const uint8_t *scratch_fb, int src_w, int src_h)
 {
-    if (!panel || !scratch_fb || !s_ppa_srm || !s_dpi_fb || !s_ppa_src_buf) return;
+    if (!panel || !scratch_fb || !s_ppa_srm || !s_dpi_fb) return;
 
     // Wait for previous frame's PPA to finish (first frame: semaphore pre-given)
     xSemaphoreTake(s_ppa_done, pdMS_TO_TICKS(100));
 
-    // Copy scratch FB to intermediate buffer so PPA can read while CPU renders next frame
-    memcpy(s_ppa_src_buf, scratch_fb, src_w * src_h * 3);
+    // With double buffering, scratch_fb points to the completed frame buffer
+    // which won't be written to until the NEXT next frame, so PPA can read directly.
+    // No memcpy needed!
 
     // PPA SRM: scale + rotate + color convert (non-blocking)
     ppa_srm_oper_config_t srm = {};
 
-    srm.in.buffer = s_ppa_src_buf;
+    srm.in.buffer = scratch_fb;
     srm.in.pic_w = src_w;
     srm.in.pic_h = src_h;
     srm.in.block_w = src_w;

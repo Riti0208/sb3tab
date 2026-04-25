@@ -1,6 +1,7 @@
 #include "sw_renderer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_cache.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "driver/ppa.h"
@@ -86,7 +87,9 @@ static DLBuf download_asset(const char *md5ext) {
 }
 
 SWRenderer::SWRenderer() {
-    fb = (uint8_t *)heap_caps_calloc(STAGE_W * STAGE_H * 3, 1, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+    fb[0] = (uint8_t *)heap_caps_calloc(STAGE_W * STAGE_H * 3, 1, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+    fb[1] = (uint8_t *)heap_caps_calloc(STAGE_W * STAGE_H * 3, 1, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+    currentFb = 0;
     penFb = nullptr;
 
     // Init PPA fill client for fast clear
@@ -102,30 +105,50 @@ SWRenderer::SWRenderer() {
 }
 
 SWRenderer::~SWRenderer() {
-    if (fb) heap_caps_free(fb);
+    if (fb[0]) heap_caps_free(fb[0]);
+    if (fb[1]) heap_caps_free(fb[1]);
     if (penFb) heap_caps_free(penFb);
     for (auto &[k, c] : costumes) {
         if (c.rgba) heap_caps_free(c.rgba);
     }
 }
 
-void SWRenderer::clear() {
-    if (s_ppa_fill && fb) {
-        ppa_fill_oper_config_t fill = {};
-        fill.out.buffer = fb;
-        fill.out.buffer_size = STAGE_W * STAGE_H * 3;
-        fill.out.pic_w = STAGE_W;
-        fill.out.pic_h = STAGE_H;
-        fill.out.block_offset_x = 0;
-        fill.out.block_offset_y = 0;
-        fill.out.fill_cm = PPA_FILL_COLOR_MODE_RGB888;
-        fill.fill_block_w = STAGE_W;
-        fill.fill_block_h = STAGE_H;
-        fill.fill_argb_color = { .val = 0xFFFFFFFF };  // white (A=255,R=255,G=255,B=255)
-        fill.mode = PPA_TRANS_MODE_BLOCKING;
-        if (ppa_do_fill(s_ppa_fill, &fill) == ESP_OK) return;
+void SWRenderer::addDirtyRect(int x, int y, int w, int h) {
+    // Disabled: not thread-safe for dual-core rendering,
+    // and not effective for projects with many sprites covering >50% of screen
+    (void)x; (void)y; (void)w; (void)h;
+}
+
+bool SWRenderer::clearDirty() {
+    auto &rects = dirtyRects[currentFb];
+    if (needFullClear[currentFb] || rects.empty()) {
+        needFullClear[currentFb] = false;
+        rects.clear();
+        return false;  // caller should do full clear
     }
-    memset(fb, 0xFF, STAGE_W * STAGE_H * 3);  // fallback
+
+    // Calculate total dirty area to decide if full clear is cheaper
+    int totalPixels = 0;
+    for (auto &r : rects) totalPixels += r.w * r.h;
+    if (totalPixels > STAGE_W * STAGE_H / 2) {
+        rects.clear();
+        return false;  // too much dirty area, full clear is better
+    }
+
+    uint8_t *cur = fb[currentFb];
+    for (auto &r : rects) {
+        for (int dy = r.y; dy < r.y + r.h; dy++) {
+            memset(cur + (dy * STAGE_W + r.x) * 3, 0xFF, r.w * 3);
+        }
+    }
+    rects.clear();
+    return true;
+}
+
+void SWRenderer::clear() {
+    dirtyRects[currentFb].clear();
+    uint8_t *cur = fb[currentFb];
+    memset(cur, 0xFF, STAGE_W * STAGE_H * 3);
 }
 
 bool SWRenderer::loadCostume(const std::string &md5ext, double rotCenterX, double rotCenterY,
@@ -263,6 +286,7 @@ void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
 
     float scaleX = (float)STAGE_W / cos.w;
     float scaleY = (float)STAGE_H / cos.h;
+    uint8_t *cur = fb[currentFb];
 
     for (int dy = 0; dy < STAGE_H; dy++) {
         int srcY = (int)(dy / scaleY);
@@ -272,7 +296,7 @@ void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
             if (srcX >= cos.w) srcX = cos.w - 1;
             const uint8_t *src = cos.rgba + (srcY * cos.w + srcX) * 4;
             if (src[3] == 0) continue;
-            uint8_t *dst = fb + (dy * STAGE_W + dx) * 3;
+            uint8_t *dst = cur + (dy * STAGE_W + dx) * 3;
             if (src[3] >= 254) {
                 dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
             } else {
@@ -308,19 +332,19 @@ bool SWRenderer::drawBackdropFull(const std::string &costumeMd5ext) {
     }
 
     if (lastWasTrivialWhite) {
-        // Default white backdrop: just memset
-        memset(fb, 0xFF, STAGE_W * STAGE_H * 3);
+        clear();  // Use non-cacheable clear
         return true;
     }
 
     // Non-trivial backdrop: render with alpha over white
     float scaleX = (float)STAGE_W / cos.w;
     float scaleY = (float)STAGE_H / cos.h;
+    uint8_t *cur = fb[currentFb];
 
     for (int dy = 0; dy < STAGE_H; dy++) {
         int srcY = (int)(dy / scaleY);
         if (srcY >= cos.h) srcY = cos.h - 1;
-        uint8_t *dstRow = fb + dy * STAGE_W * 3;
+        uint8_t *dstRow = cur + dy * STAGE_W * 3;
         const uint8_t *srcRow = cos.rgba + srcY * cos.w * 4;
         for (int dx = 0; dx < STAGE_W; dx++) {
             int srcX = (int)(dx / scaleX);
@@ -355,10 +379,11 @@ void SWRenderer::clearPenLayer() {
 
 void SWRenderer::compositePenLayer() {
     if (!penFb) return;
+    uint8_t *cur = fb[currentFb];
     for (int i = 0; i < STAGE_W * STAGE_H; i++) {
         uint8_t *src = penFb + i * 4;
         if (src[3] == 0) continue;
-        uint8_t *dst = fb + i * 3;
+        uint8_t *dst = cur + i * 3;
         int a = src[3];
         if (a >= 254) {
             dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
@@ -491,6 +516,12 @@ void SWRenderer::penStampSprite(const std::string &costumeMd5ext, float x, float
     }
 }
 
+// Internal SRAM cache for fast costume pixel access (avoids slow PSRAM random reads)
+// Per-core to avoid race conditions in dual-core rendering
+static uint8_t *s_iram_cache[2] = {nullptr, nullptr};
+static int s_iram_cache_cap[2] = {0, 0};
+static const uint8_t *s_iram_cached_src[2] = {nullptr, nullptr};
+
 void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
                           float scale, float angleDeg, float alpha,
                           float brightness) {
@@ -501,7 +532,6 @@ void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
     float sinA = sinf(rad);
 
     // Compute bounding box from all 4 corners of the scaled sprite
-    // Sprite extends from (-rotCenterX, -rotCenterY) to (w-rotCenterX, h-rotCenterY)
     float corners[4][2] = {
         { (float)-cos.rotCenterX * scale, (float)-cos.rotCenterY * scale },
         { (float)(cos.w - cos.rotCenterX) * scale, (float)-cos.rotCenterY * scale },
@@ -528,52 +558,104 @@ void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
     if (minY < 0) minY = 0;
     if (maxX >= STAGE_W) maxX = STAGE_W - 1;
     if (maxY >= STAGE_H) maxY = STAGE_H - 1;
+    if (minX > maxX || minY > maxY) return;
+
+    // Track dirty rect for next frame's partial clear
+    addDirtyRect(minX, minY, maxX - minX + 1, maxY - minY + 1);
 
     int alphaI = (int)(alpha * 255);
     float invScale = 1.0f / scale;
 
-    for (int dy = minY; dy <= maxY; dy++) {
-        for (int dx = minX; dx <= maxX; dx++) {
-            // Inverse transform: screen → sprite local coords
-            float u = (float)(dx - cx) * invScale;
-            float v = (float)(dy - cy) * invScale;
-
-            // Inverse rotation + translate to sprite pixel coords
-            int srcX = (int)(cosA * u + sinA * v + cos.rotCenterX);
-            int srcY = (int)(-sinA * u + cosA * v + cos.rotCenterY);
-
-            if (srcX < 0 || srcX >= cos.w || srcY < 0 || srcY >= cos.h) continue;
-
-            const uint8_t *src = cos.rgba + (srcY * cos.w + srcX) * 4;
-            int srcA = (src[3] * alphaI) >> 8;
-            if (srcA == 0) continue;
-
-            int pr = src[0], pg = src[1], pb = src[2];
-            // Apply brightness effect (-100 to 100)
-            if (brightness > 0.5f) {
-                float t = brightness / 100.0f;
-                pr = pr + (int)((255 - pr) * t);
-                pg = pg + (int)((255 - pg) * t);
-                pb = pb + (int)((255 - pb) * t);
-            } else if (brightness < -0.5f) {
-                float t = 1.0f + brightness / 100.0f;
-                pr = (int)(pr * t);
-                pg = (int)(pg * t);
-                pb = (int)(pb * t);
+    // Cache small costumes in internal SRAM (clones share same rgba pointer → cache hit)
+    // Per-core cache to avoid race conditions in dual-core rendering
+    const uint8_t *srcPixels = cos.rgba;
+    int costumeBytes = cos.w * cos.h * 4;
+    int coreId = xPortGetCoreID();
+    if (costumeBytes <= 64 * 1024) {
+        if (cos.rgba != s_iram_cached_src[coreId] || !s_iram_cache[coreId]) {
+            if (!s_iram_cache[coreId] || s_iram_cache_cap[coreId] < costumeBytes) {
+                if (s_iram_cache[coreId]) heap_caps_free(s_iram_cache[coreId]);
+                s_iram_cache_cap[coreId] = costumeBytes;
+                s_iram_cache[coreId] = (uint8_t *)heap_caps_malloc(s_iram_cache_cap[coreId], MALLOC_CAP_INTERNAL);
             }
-
-            uint8_t *dst = fb + (dy * STAGE_W + dx) * 3;
-            if (srcA >= 254) {
-                dst[0] = pr;
-                dst[1] = pg;
-                dst[2] = pb;
-            } else {
-                dst[0] = (pr * srcA + dst[0] * (255 - srcA)) >> 8;
-                dst[1] = (pg * srcA + dst[1] * (255 - srcA)) >> 8;
-                dst[2] = (pb * srcA + dst[2] * (255 - srcA)) >> 8;
+            if (s_iram_cache[coreId]) {
+                memcpy(s_iram_cache[coreId], cos.rgba, costumeBytes);
+                s_iram_cached_src[coreId] = cos.rgba;
             }
         }
+        if (s_iram_cache[coreId]) srcPixels = s_iram_cache[coreId];
     }
+
+    // Fixed-point 16.16 incremental computation (eliminates multiply per pixel)
+    int32_t dSrcX_fp = (int32_t)(cosA * invScale * 65536.0f);
+    int32_t dSrcY_fp = (int32_t)(-sinA * invScale * 65536.0f);
+
+    // Pre-compute brightness as fixed-point
+    int32_t brightFp = 0;
+    bool brightPos = brightness > 0.5f;
+    bool brightNeg = brightness < -0.5f;
+    if (brightPos) brightFp = (int32_t)(brightness * 256.0f / 100.0f);
+    else if (brightNeg) brightFp = (int32_t)((1.0f + brightness / 100.0f) * 256.0f);
+
+    const unsigned uw = (unsigned)cos.w;
+    const unsigned uh = (unsigned)cos.h;
+    const int stride = cos.w * 4;
+
+    for (int dy = minY; dy <= maxY; dy++) {
+        float u0 = (float)(minX - cx) * invScale;
+        float v0 = (float)(dy - cy) * invScale;
+        int32_t srcX_fp = (int32_t)((cosA * u0 + sinA * v0 + cos.rotCenterX) * 65536.0f);
+        int32_t srcY_fp = (int32_t)((-sinA * u0 + cosA * v0 + cos.rotCenterY) * 65536.0f);
+
+        uint8_t *dstRow = fb[currentFb] + (dy * STAGE_W + minX) * 3;
+
+        for (int dx = minX; dx <= maxX; dx++) {
+            int srcX = srcX_fp >> 16;
+            int srcY = srcY_fp >> 16;
+            srcX_fp += dSrcX_fp;
+            srcY_fp += dSrcY_fp;
+
+            if ((unsigned)srcX >= uw || (unsigned)srcY >= uh) {
+                dstRow += 3;
+                continue;
+            }
+
+            const uint8_t *src = srcPixels + srcY * stride + srcX * 4;
+            int srcA = (src[3] * alphaI) >> 8;
+            if (srcA == 0) { dstRow += 3; continue; }
+
+            int pr = src[0], pg = src[1], pb = src[2];
+            if (brightPos) {
+                pr += ((255 - pr) * brightFp) >> 8;
+                pg += ((255 - pg) * brightFp) >> 8;
+                pb += ((255 - pb) * brightFp) >> 8;
+            } else if (brightNeg) {
+                pr = (pr * brightFp) >> 8;
+                pg = (pg * brightFp) >> 8;
+                pb = (pb * brightFp) >> 8;
+            }
+
+            if (srcA >= 254) {
+                dstRow[0] = pr;
+                dstRow[1] = pg;
+                dstRow[2] = pb;
+            } else {
+                int invA = 255 - srcA;
+                dstRow[0] = (pr * srcA + dstRow[0] * invA) >> 8;
+                dstRow[1] = (pg * srcA + dstRow[1] * invA) >> 8;
+                dstRow[2] = (pb * srcA + dstRow[2] * invA) >> 8;
+            }
+            dstRow += 3;
+        }
+    }
+}
+
+bool SWRenderer::getCostumeSize(const std::string &name, int &w, int &h) const {
+    auto it = costumes.find(name);
+    if (it == costumes.end()) return false;
+    w = it->second.w;
+    h = it->second.h;
+    return true;
 }
 
 // JPEG encoding callback
@@ -600,7 +682,7 @@ uint8_t *SWRenderer::encodeJpeg(int quality, int *outSize) {
     ctx.data = (uint8_t *)heap_caps_malloc(ctx.cap, MALLOC_CAP_SPIRAM);
     ctx.len = 0;
 
-    stbi_write_jpg_to_func(jpeg_write_func, &ctx, STAGE_W, STAGE_H, 3, fb, quality);
+    stbi_write_jpg_to_func(jpeg_write_func, &ctx, STAGE_W, STAGE_H, 3, fb[currentFb], quality);
 
     *outSize = ctx.len;
     return ctx.data;
