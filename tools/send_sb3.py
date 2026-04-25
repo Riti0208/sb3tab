@@ -139,7 +139,8 @@ def send_project(sb3_data: bytes, port: str):
             ser.close()
             return False
         send_data(ser, data)
-        if not wait_for(ser, "OK", 30):
+        timeout = max(30, len(data) / 10000 + 10)  # Scale with size
+        if not wait_for(ser, "OK", timeout):
             print(f"Failed to send {name}")
             ser.close()
             return False

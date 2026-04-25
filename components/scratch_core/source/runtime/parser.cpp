@@ -262,6 +262,10 @@ void Parser::loadSprites(const nlohmann::json &json) {
                         if (inputValue.is_array()) {
                             parsedInput.inputType = ParsedInput::VARIABLE;
                             parsedInput.variableId = inputValue[2].get<std::string>();
+                        } else if (newBlock.opcode == "procedures_definition" && inputValue.is_string()) {
+                            parsedInput.inputType = ParsedInput::LITERAL;
+                            parsedInput.literalValue = Value(inputValue.get<std::string>());
+                            newSprite->customBlockDefinitions[inputValue.get<std::string>()] = newBlock.id;
                         } else {
                             parsedInput.inputType = ParsedInput::BLOCK;
                             if (!inputValue.is_null())
@@ -373,6 +377,9 @@ void Parser::loadSprites(const nlohmann::json &json) {
             }
             if (data.contains("md5ext")) {
                 newCostume.fullName = data["md5ext"];
+            } else if (data.contains("assetId") && data.contains("dataFormat")) {
+                // Some projects lack md5ext; reconstruct from assetId + dataFormat
+                newCostume.fullName = std::string(data["assetId"]) + "." + std::string(data["dataFormat"]);
             }
             if (data.contains("rotationCenterX")) {
                 newCostume.rotationCenterX = data["rotationCenterX"];

@@ -42,6 +42,10 @@ public:
     // Draw stage backdrop (no rotation, fills entire stage)
     void drawBackdrop(const std::string &costumeMd5ext);
 
+    // Draw backdrop filling every pixel (replaces clear+drawBackdrop)
+    // Returns false if costume not found (caller should clear instead)
+    bool drawBackdropFull(const std::string &costumeMd5ext);
+
     // Pen layer
     void initPenLayer();
     void clearPenLayer();

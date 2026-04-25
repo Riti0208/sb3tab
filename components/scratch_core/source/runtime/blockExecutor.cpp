@@ -152,7 +152,9 @@ void BlockExecutor::runBlock(Block &block, Sprite *sprite, bool *withoutScreenRe
         if (result == BlockResult::RETURN) return;
 
         if (currentBlock->next.empty()) return;
-        currentBlock = sprite->blocksMap[currentBlock->next];
+        auto it = sprite->blocksMap.find(currentBlock->next);
+        if (it == sprite->blocksMap.end() || !it->second) return;
+        currentBlock = it->second;
         fromRepeat = false;
     }
 }
@@ -314,7 +316,17 @@ BlockResult BlockExecutor::runCustomBlock(Sprite *sprite, Block &block, Block *c
             }
 
             // Get the parent of the prototype block (the definition containing all blocks)
-            Block *customBlockDefinition = sprite->blocksMap[sprite->customBlockDefinitions[data.blockId]];
+            auto defIt = sprite->customBlockDefinitions.find(data.blockId);
+            if (defIt == sprite->customBlockDefinitions.end()) {
+                Log::logWarning("Custom block def not found: " + data.blockId);
+                break;
+            }
+            auto blkIt = sprite->blocksMap.find(defIt->second);
+            if (blkIt == sprite->blocksMap.end() || !blkIt->second) {
+                Log::logWarning("Custom block map miss: " + defIt->second);
+                break;
+            }
+            Block *customBlockDefinition = blkIt->second;
 
             callerBlock->customBlockPtr = customBlockDefinition;
 

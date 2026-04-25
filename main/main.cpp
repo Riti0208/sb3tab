@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_psram.h"
 #include "esp_task_wdt.h"
@@ -30,7 +31,10 @@
 #include <renderers/headless/headless_fb.hpp>
 #include "sw_renderer.h"
 #include "lcd_driver.h"
+#include "dsi_display.h"
 
+// Build for DSI (Tab5) or SPI LCD
+#define USE_DSI_DISPLAY 1
 
 static const char *TAG = "scratcher";
 
@@ -40,8 +44,12 @@ __attribute__((used)) static auto *_force_blocks = &nopBlock;
 static volatile bool scratch_running = false;
 static SemaphoreHandle_t sprite_mutex = nullptr;
 static SWRenderer *renderer = nullptr;
+#if USE_DSI_DISPLAY
+static esp_lcd_panel_handle_t dsi_panel = nullptr;
+#else
 static esp_lcd_panel_handle_t lcd_panel = nullptr;
-static uint16_t *lcd_fb = nullptr;  // RGB565 framebuffer for LCD
+static uint16_t *lcd_fb = nullptr;
+#endif
 
 // ============================================================
 // USB Serial/JTAG LL API
@@ -135,7 +143,9 @@ static bool handle_command(const char *line) {
         char *buf = (char *)heap_caps_malloc(size + 1, MALLOC_CAP_SPIRAM);
         if (!buf) { usb_ll_write("ERR:alloc\n"); return false; }
 
-        int got = usb_ll_read_bulk((uint8_t *)buf, size, 10000);
+        // Timeout scales with size: ~12KB/s USB throughput + 5s margin
+        int timeout_ms = (int)(size / 12) + 5000;
+        int got = usb_ll_read_bulk((uint8_t *)buf, size, timeout_ms);
         if ((size_t)got != size) {
             char msg[64];
             snprintf(msg, sizeof(msg), "ERR:got %d/%zu\n", got, size);
@@ -177,7 +187,8 @@ static bool handle_command(const char *line) {
         uint8_t *buf = (uint8_t *)heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
         if (!buf) { usb_ll_write("ERR:alloc\n"); return false; }
 
-        int got = usb_ll_read_bulk(buf, size, 10000);
+        int timeout_ms = (int)(size / 12) + 5000;
+        int got = usb_ll_read_bulk(buf, size, timeout_ms);
         if ((size_t)got != size) {
             char msg[64];
             snprintf(msg, sizeof(msg), "ERR:got %d/%zu\n", got, size);
@@ -195,7 +206,7 @@ static bool handle_command(const char *line) {
     }
 
     char msg[96];
-    snprintf(msg, sizeof(msg), "ERR:unknown '%s'\n", line);
+    snprintf(msg, sizeof(msg), "ERR:unknown '%.60s'\n", line);
     usb_ll_write(msg);
     return false;
 }
@@ -231,26 +242,39 @@ static void pen_stamp_cb(const char *costume, float x, float y,
 // Scratch Runtime Task
 // ============================================================
 
+static int s_frame_count = 0;
+static int64_t s_total_step = 0, s_total_render = 0, s_total_lcd = 0;
+
 static void scratch_runtime_task(void *param)
 {
     while (scratch_running) {
         xSemaphoreTake(sprite_mutex, portMAX_DELAY);
+
+        int64_t t0 = esp_timer_get_time();
         auto [running, restart] = Scratch::stepScratchProject();
+        int64_t t1 = esp_timer_get_time();
 
         if (renderer) {
-            // 1. Clear to white
-            renderer->clear();
+            int64_t r0 = esp_timer_get_time();
 
-            // 2. Draw stage backdrop
-            if (Scratch::stageSprite) {
-                int cosIdx = Scratch::stageSprite->currentCostume;
-                if (cosIdx >= 0 && cosIdx < (int)Scratch::stageSprite->costumes.size()) {
-                    renderer->drawBackdrop(Scratch::stageSprite->costumes[cosIdx].fullName);
+            // 1+2. Draw backdrop directly (or clear to white if no backdrop)
+            {
+                bool drewBackdrop = false;
+                if (Scratch::stageSprite) {
+                    int cosIdx = Scratch::stageSprite->currentCostume;
+                    if (cosIdx >= 0 && cosIdx < (int)Scratch::stageSprite->costumes.size()) {
+                        drewBackdrop = renderer->drawBackdropFull(
+                            Scratch::stageSprite->costumes[cosIdx].fullName);
+                    }
                 }
+                if (!drewBackdrop) renderer->clear();
             }
+            int64_t r1 = esp_timer_get_time();
+            int64_t r2 = r1; // backdrop merged into clear
 
             // 3. Composite pen layer
             renderer->compositePenLayer();
+            int64_t r3 = esp_timer_get_time();
 
             // 4. Draw sprites (in layer order)
             for (auto &sprite : Scratch::sprites) {
@@ -264,6 +288,7 @@ static void scratch_runtime_task(void *param)
                                      sprite->visible, sprite->ghostEffect,
                                      sprite->brightnessEffect);
             }
+            int64_t r4 = esp_timer_get_time();
 
             // 5. Draw speech bubbles
             SpeechManager *sm = Render::getSpeechManager();
@@ -272,19 +297,54 @@ static void scratch_runtime_task(void *param)
                     renderer->getFramebuffer(), STAGE_W, STAGE_H,
                     Scratch::projectWidth, Scratch::projectHeight);
             }
+            int64_t r5 = esp_timer_get_time();
 
             // 6. Draw variable/list monitors
             g_headless_fb.fb = renderer->getFramebuffer();
             g_headless_fb.width = STAGE_W;
             g_headless_fb.height = STAGE_H;
             Render::renderMonitors();
+            int64_t r6 = esp_timer_get_time();
 
-            // 7. Push framebuffer to SPI LCD (scale 480x360 → 320x240)
+            int64_t t2 = r6;
+
+            // 7. Push framebuffer to display
+#if USE_DSI_DISPLAY
+            if (dsi_panel) {
+                dsi_display_update(dsi_panel, renderer->getFramebuffer(), STAGE_W, STAGE_H);
+            }
+#else
             if (lcd_panel && lcd_fb) {
                 rgb888_to_rgb565_scaled(renderer->getFramebuffer(),
                                         STAGE_W, STAGE_H,
                                         lcd_fb, LCD_W, LCD_H);
                 lcd_draw_framebuffer(lcd_panel, lcd_fb);
+            }
+#endif
+
+            int64_t t3 = esp_timer_get_time();
+
+            s_total_step += (t1 - t0);
+            s_total_render += (t2 - t1);
+            s_total_lcd += (t3 - t2);
+            s_frame_count++;
+
+            // Detailed render breakdown accumulators
+            static int64_t s_r_clear=0, s_r_bg=0, s_r_pen=0, s_r_spr=0, s_r_speech=0, s_r_mon=0;
+            s_r_clear += (r1-r0); s_r_bg += (r2-r1); s_r_pen += (r3-r2);
+            s_r_spr += (r4-r3); s_r_speech += (r5-r4); s_r_mon += (r6-r5);
+
+            if (s_frame_count % 60 == 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                    "step:%lld clr:%lld bg:%lld pen:%lld spr:%lld say:%lld mon:%lld lcd:%lld\n",
+                    s_total_step/60,
+                    s_r_clear/60, s_r_bg/60, s_r_pen/60,
+                    s_r_spr/60, s_r_speech/60, s_r_mon/60,
+                    s_total_lcd/60);
+                usb_ll_write(msg);
+                s_total_step = s_total_render = s_total_lcd = 0;
+                s_r_clear = s_r_bg = s_r_pen = s_r_spr = s_r_speech = s_r_mon = 0;
             }
         }
         xSemaphoreGive(sprite_mutex);
@@ -393,6 +453,15 @@ extern "C" void app_main(void)
     sprite_mutex = xSemaphoreCreateMutex();
     renderer = new SWRenderer();
 
+#if USE_DSI_DISPLAY
+    usb_ll_write("DSI_INIT_START\n");
+    dsi_panel = dsi_display_init();
+    if (dsi_panel) {
+        usb_ll_write("DSI_INIT_OK\n");
+    } else {
+        usb_ll_write("DSI_INIT_FAIL\n");
+    }
+#else
     lcd_fb = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
     usb_ll_write("LCD_INIT_START\n");
     lcd_panel = lcd_init();
@@ -401,6 +470,7 @@ extern "C" void app_main(void)
     } else {
         usb_ll_write("LCD_INIT_FAIL\n");
     }
+#endif
 
     vTaskDelay(pdMS_TO_TICKS(500));
 

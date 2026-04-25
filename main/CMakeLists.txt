@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp"
+    SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -7,9 +7,12 @@ idf_component_register(
         esp_event
         nvs_flash
         esp_psram
+        esp_timer
         hal
         scratch_core
         esp_driver_ppa
+        esp_driver_ledc
+        esp_driver_i2c
         esp_mm
 )
 

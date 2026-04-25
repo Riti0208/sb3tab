@@ -3,9 +3,12 @@
 #include "esp_heap_caps.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "driver/ppa.h"
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+
+static ppa_client_handle_t s_ppa_fill = NULL;
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -85,6 +88,16 @@ static DLBuf download_asset(const char *md5ext) {
 SWRenderer::SWRenderer() {
     fb = (uint8_t *)heap_caps_calloc(STAGE_W * STAGE_H * 3, 1, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
     penFb = nullptr;
+
+    // Init PPA fill client for fast clear
+    if (!s_ppa_fill) {
+        ppa_client_config_t cfg = { .oper_type = PPA_OPERATION_FILL, .max_pending_trans_num = 1 };
+        if (ppa_register_client(&cfg, &s_ppa_fill) != ESP_OK) {
+            ESP_LOGW(TAG, "PPA fill init failed, using memset fallback");
+            s_ppa_fill = NULL;
+        }
+    }
+
     clear();
 }
 
@@ -97,7 +110,22 @@ SWRenderer::~SWRenderer() {
 }
 
 void SWRenderer::clear() {
-    memset(fb, 0xFF, STAGE_W * STAGE_H * 3);  // white
+    if (s_ppa_fill && fb) {
+        ppa_fill_oper_config_t fill = {};
+        fill.out.buffer = fb;
+        fill.out.buffer_size = STAGE_W * STAGE_H * 3;
+        fill.out.pic_w = STAGE_W;
+        fill.out.pic_h = STAGE_H;
+        fill.out.block_offset_x = 0;
+        fill.out.block_offset_y = 0;
+        fill.out.fill_cm = PPA_FILL_COLOR_MODE_RGB888;
+        fill.fill_block_w = STAGE_W;
+        fill.fill_block_h = STAGE_H;
+        fill.fill_argb_color = { .val = 0xFFFFFFFF };  // white (A=255,R=255,G=255,B=255)
+        fill.mode = PPA_TRANS_MODE_BLOCKING;
+        if (ppa_do_fill(s_ppa_fill, &fill) == ESP_OK) return;
+    }
+    memset(fb, 0xFF, STAGE_W * STAGE_H * 3);  // fallback
 }
 
 bool SWRenderer::loadCostume(const std::string &md5ext, double rotCenterX, double rotCenterY,
@@ -255,6 +283,63 @@ void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
             }
         }
     }
+}
+
+bool SWRenderer::drawBackdropFull(const std::string &costumeMd5ext) {
+    auto it = costumes.find(costumeMd5ext);
+    if (it == costumes.end()) return false;
+
+    const CostumePixels &cos = it->second;
+    if (!cos.rgba) return false;
+
+    // Check if backdrop is trivially white/empty (cache result per costume)
+    static std::string lastCheckedCostume;
+    static bool lastWasTrivialWhite = false;
+    if (costumeMd5ext != lastCheckedCostume) {
+        lastCheckedCostume = costumeMd5ext;
+        lastWasTrivialWhite = true;
+        for (int i = 0; i < cos.w * cos.h && lastWasTrivialWhite; i++) {
+            const uint8_t *p = cos.rgba + i * 4;
+            // Check if pixel is either transparent or white
+            if (p[3] == 0) continue;
+            if (p[3] >= 254 && p[0] >= 254 && p[1] >= 254 && p[2] >= 254) continue;
+            lastWasTrivialWhite = false;
+        }
+    }
+
+    if (lastWasTrivialWhite) {
+        // Default white backdrop: just memset
+        memset(fb, 0xFF, STAGE_W * STAGE_H * 3);
+        return true;
+    }
+
+    // Non-trivial backdrop: render with alpha over white
+    float scaleX = (float)STAGE_W / cos.w;
+    float scaleY = (float)STAGE_H / cos.h;
+
+    for (int dy = 0; dy < STAGE_H; dy++) {
+        int srcY = (int)(dy / scaleY);
+        if (srcY >= cos.h) srcY = cos.h - 1;
+        uint8_t *dstRow = fb + dy * STAGE_W * 3;
+        const uint8_t *srcRow = cos.rgba + srcY * cos.w * 4;
+        for (int dx = 0; dx < STAGE_W; dx++) {
+            int srcX = (int)(dx / scaleX);
+            if (srcX >= cos.w) srcX = cos.w - 1;
+            const uint8_t *src = srcRow + srcX * 4;
+            uint8_t *dst = dstRow + dx * 3;
+            if (src[3] >= 254) {
+                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+            } else if (src[3] == 0) {
+                dst[0] = 255; dst[1] = 255; dst[2] = 255;
+            } else {
+                int a = src[3];
+                dst[0] = src[0] + (((255 - src[0]) * (255 - a)) >> 8);
+                dst[1] = src[1] + (((255 - src[1]) * (255 - a)) >> 8);
+                dst[2] = src[2] + (((255 - src[2]) * (255 - a)) >> 8);
+            }
+        }
+    }
+    return true;
 }
 
 // ---- Pen layer ----
