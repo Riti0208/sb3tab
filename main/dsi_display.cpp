@@ -37,6 +37,9 @@ static const char *TAG = "dsi_disp";
 #define PI4IO_REG_PULL_SEL    0x0D
 #define PI4IO_REG_INT_MASK    0x11
 
+// Exported for camera_qr.cpp (shared I2C bus for SCCB)
+i2c_master_bus_handle_t g_i2c_bus = NULL;
+
 static i2c_master_dev_handle_t i2c_dev_handle_pi4ioe1 = NULL;
 static i2c_master_dev_handle_t i2c_dev_handle_pi4ioe2 = NULL;
 
@@ -193,7 +196,7 @@ static bool ppa_srm_done_cb(ppa_client_handle_t client, ppa_event_data_t *event_
 esp_lcd_panel_handle_t dsi_display_init()
 {
     // 1. I2C init
-    i2c_master_bus_handle_t i2c_bus = NULL;
+    i2c_master_bus_handle_t &i2c_bus = g_i2c_bus;
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_NUM_0,
         .sda_io_num = GPIO_NUM_31,

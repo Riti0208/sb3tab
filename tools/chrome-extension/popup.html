@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {
+  width: 340px;
+  padding: 16px;
+  font-family: -apple-system, sans-serif;
+  background: #fff;
+  margin: 0;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.tab {
+  flex: 1;
+  padding: 8px;
+  border: 2px solid #ddd;
+  border-radius: 8px;
+  background: #f5f5f5;
+  cursor: pointer;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #666;
+  transition: all 0.15s;
+}
+.tab.active {
+  border-color: #FF8C1A;
+  background: #FFF3E6;
+  color: #FF8C1A;
+}
+.panel { display: none; }
+.panel.active { display: block; }
+
+h2 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  color: #333;
+}
+#status {
+  font-size: 13px;
+  color: #666;
+  margin-bottom: 8px;
+}
+#status.error { color: #c33; }
+#status.ok { color: #2a2; }
+
+.input-group {
+  margin-bottom: 8px;
+}
+.input-group label {
+  display: block;
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 2px;
+}
+.input-group input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+button#gen-wifi {
+  width: 100%;
+  padding: 8px;
+  background: #FF8C1A;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 4px;
+}
+button#gen-wifi:hover { background: #E67A00; }
+
+#qr-container, #qr-wifi {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0;
+}
+#qr-container canvas, #qr-wifi canvas {
+  border: 2px solid #eee;
+  border-radius: 8px;
+}
+.info {
+  font-size: 11px;
+  color: #999;
+  text-align: center;
+  word-break: break-all;
+  margin-top: 4px;
+}
+</style>
+</head>
+<body>
+  <div class="tabs">
+    <div class="tab active" data-panel="wifi-panel">WiFi</div>
+    <div class="tab" data-panel="project-panel">Project</div>
+  </div>
+
+  <div id="wifi-panel" class="panel active">
+    <h2>WiFi QR for Tab5</h2>
+    <div class="input-group">
+      <label>SSID</label>
+      <input type="text" id="wifi-ssid" placeholder="Network name">
+    </div>
+    <div class="input-group">
+      <label>Password</label>
+      <input type="password" id="wifi-pass" placeholder="Password">
+    </div>
+    <button id="gen-wifi">Generate QR</button>
+    <div id="qr-wifi"></div>
+    <div id="wifi-info" class="info"></div>
+  </div>
+
+  <div id="project-panel" class="panel">
+    <h2>Scratch Project QR</h2>
+    <div id="status">Detecting Scratch project...</div>
+    <div id="qr-container"></div>
+    <div id="project-info" class="info"></div>
+  </div>
+
+  <script src="qrcode.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

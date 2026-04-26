@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
+         "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -14,6 +15,11 @@ idf_component_register(
         esp_driver_ledc
         esp_driver_i2c
         esp_mm
+        esp_wifi
+        esp_netif
+        esp_http_client
+        esp_video
+        quirc
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

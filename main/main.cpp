@@ -2,6 +2,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,9 +33,15 @@
 #include "sw_renderer.h"
 #include "lcd_driver.h"
 #include "dsi_display.h"
+#include "camera_qr.h"
+#include "wifi_manager.h"
+#include "dsi_modal.h"
 
 // Build for DSI (Tab5) or SPI LCD
 #define USE_DSI_DISPLAY 1
+
+// Enable QR code scanning mode (camera + WiFi download)
+#define USE_QR_MODE 1
 
 static const char *TAG = "scratcher";
 
@@ -58,12 +65,17 @@ static uint16_t *lcd_fb = nullptr;
 static void usb_ll_write(const char *str) {
     const uint8_t *p = (const uint8_t *)str;
     size_t remaining = strlen(str);
+    int retries = 0;
     while (remaining > 0) {
         if (usb_serial_jtag_ll_txfifo_writable()) {
             int written = usb_serial_jtag_ll_write_txfifo(p, remaining);
             usb_serial_jtag_ll_txfifo_flush();
             p += written;
             remaining -= written;
+            retries = 0;
+        } else {
+            retries++;
+            if (retries > 50) break;  // Don't block if host isn't reading
         }
         vTaskDelay(1);
     }
@@ -397,16 +409,7 @@ static void scratch_runtime_task(void *param)
             xSemaphoreGive(s_render_start);
 
             s_frame_count++;
-            if (s_frame_count % 120 == 0) {
-                int64_t frame_us = t3 - t0;
-                int64_t step_us = t1 - t0;
-                int64_t wait_us = r1 - t1;
-                int64_t spr_us = r4 - r1;
-                char msg[128];
-                snprintf(msg, sizeof(msg), "frame:%lld step:%lld wait:%lld spr:%lld fps:%.1f\n",
-                         frame_us, step_us, wait_us, spr_us, 1000000.0f / frame_us);
-                usb_ll_write(msg);
-            }
+            // Frame stats disabled - usb_ll_write blocks when host doesn't read, freezing render loop
         }
         xSemaphoreGive(sprite_mutex);
 
@@ -504,6 +507,142 @@ static bool load_and_run()
 }
 
 // ============================================================
+// QR mode: download project via WiFi
+// ============================================================
+
+#if USE_QR_MODE && USE_DSI_DISPLAY
+
+// Simple text overlay on DPI framebuffer (RGB565, portrait 720x1280)
+// Draws white text on semi-transparent black bar at bottom
+static bool qr_download_project(const char *project_id)
+{
+    usb_ll_write("DL_START\n");
+    dsi_modal_show(dsi_panel, "Fetching info...", project_id);
+
+    // Step 1: Get project token from API
+    char url[256];
+    snprintf(url, sizeof(url), "https://api.scratch.mit.edu/projects/%s", project_id);
+
+    size_t api_len = 0;
+    uint8_t *api_data = wifi_http_get(url, &api_len);
+    if (!api_data) {
+        usb_ll_write("ERR:api fetch\n");
+        return false;
+    }
+
+    // Parse API response for project_token
+    nlohmann::json api_json;
+    try {
+        api_json = nlohmann::json::parse(api_data, api_data + api_len);
+    } catch (...) {
+        usb_ll_write("ERR:api json\n");
+        heap_caps_free(api_data);
+        return false;
+    }
+    heap_caps_free(api_data);
+
+    std::string token;
+    if (api_json.contains("project_token")) {
+        token = api_json["project_token"].get<std::string>();
+    }
+
+    // Step 2: Download project.json
+    dsi_modal_show(dsi_panel, "Loading JSON...", nullptr);
+    snprintf(url, sizeof(url), "https://projects.scratch.mit.edu/%s%s%s",
+             project_id, token.empty() ? "" : "?token=", token.c_str());
+
+    size_t json_len = 0;
+    uint8_t *json_data = wifi_http_get(url, &json_len, [](size_t rx, size_t total) {
+        if (total > 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "JSON: %zu/%zu (%d%%)\n", rx, total, (int)(rx * 100 / total));
+            usb_ll_write(msg);
+        }
+    });
+    if (!json_data) {
+        usb_ll_write("ERR:json fetch\n");
+        return false;
+    }
+
+    // Parse project JSON
+    if (g_project_json) delete g_project_json;
+    g_project_json = new nlohmann::json();
+    try {
+        *g_project_json = nlohmann::json::parse(json_data, json_data + json_len);
+    } catch (...) {
+        usb_ll_write("ERR:json parse\n");
+        heap_caps_free(json_data);
+        delete g_project_json;
+        g_project_json = nullptr;
+        return false;
+    }
+    heap_caps_free(json_data);
+    usb_ll_write("JSON_OK\n");
+
+    // Step 3: Extract asset list and download each
+    std::vector<std::string> asset_names;
+    for (auto &target : (*g_project_json)["targets"]) {
+        for (auto &costume : target["costumes"]) {
+            std::string md5ext;
+            if (costume.contains("md5ext")) {
+                md5ext = costume["md5ext"].get<std::string>();
+            } else {
+                md5ext = costume.value("assetId", "") + "." + costume.value("dataFormat", "svg");
+            }
+            if (!md5ext.empty()) asset_names.push_back(md5ext);
+        }
+        for (auto &sound : target["sounds"]) {
+            std::string md5ext;
+            if (sound.contains("md5ext")) {
+                md5ext = sound["md5ext"].get<std::string>();
+            } else {
+                md5ext = sound.value("assetId", "") + "." + sound.value("dataFormat", "wav");
+            }
+            if (!md5ext.empty()) asset_names.push_back(md5ext);
+        }
+    }
+
+    // Remove duplicates
+    std::sort(asset_names.begin(), asset_names.end());
+    asset_names.erase(std::unique(asset_names.begin(), asset_names.end()), asset_names.end());
+
+    int total_assets = (int)asset_names.size();
+    int downloaded = 0;
+
+    for (auto &name : asset_names) {
+        dsi_modal_progress(dsi_panel, "Assets", downloaded, total_assets);
+
+        snprintf(url, sizeof(url),
+                 "https://assets.scratch.mit.edu/internalapi/asset/%s/get/", name.c_str());
+
+        size_t asset_len = 0;
+        uint8_t *asset_data = wifi_http_get(url, &asset_len);
+
+        if (!asset_data) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "WARN:asset skip %s\n", name.c_str());
+            usb_ll_write(msg);
+            continue;
+        }
+
+        g_assets.push_back({name, asset_data, asset_len});
+        downloaded++;
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "ASSET %d/%d: %s (%zu B)\n",
+                 downloaded, total_assets, name.c_str(), asset_len);
+        usb_ll_write(msg);
+    }
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "DL_DONE: %d assets\n", downloaded);
+    usb_ll_write(msg);
+    return true;
+}
+
+#endif // USE_QR_MODE && USE_DSI_DISPLAY
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -543,6 +682,143 @@ extern "C" void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
+#if USE_QR_MODE && USE_DSI_DISPLAY
+    // ============================================================
+    // QR Scan Mode: Camera → WiFi QR → Project QR → Download → Run
+    // ============================================================
+    {
+        usb_ll_write("QR_MODE_START\n");
+
+        // Initialize WiFi subsystem
+        wifi_init();
+
+        // Initialize camera
+        if (!camera_init()) {
+            usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
+            goto usb_mode;
+        }
+
+        char qr_buf[512];
+
+        // Phase 1: Scan WiFi QR code (also accepts USB serial: WIFI:SSID:PASSWORD)
+        usb_ll_write("SCAN_WIFI_QR\n");
+        {
+            char usb_line[256];
+            auto try_wifi_connect = [&](char *ssid, char *password) -> bool {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "WIFI_CONNECTING: %.64s\n", ssid);
+                usb_ll_write(msg);
+                dsi_modal_show(dsi_panel, "Connecting...", ssid);
+
+                if (wifi_connect(ssid, password, 15000)) {
+                    usb_ll_write("WIFI_OK\n");
+                    dsi_modal_show(dsi_panel, "WiFi OK!", ssid);
+                    vTaskDelay(pdMS_TO_TICKS(1500));
+                    return true;
+                } else {
+                    usb_ll_write("WIFI_FAIL\n");
+                    dsi_modal_show(dsi_panel, "WiFi Failed", "Try again...");
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    return false;
+                }
+            };
+
+            bool connected = false;
+            int wifi_attempts = 0;
+            while (!connected) {
+                // Check QR camera
+                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, "Scan WiFi QR")) {
+                    if (qr_buf[0] == 'W' && qr_buf[1] == ':') {
+                        char *ssid = qr_buf + 2;
+                        char *newline = strchr(ssid, '\n');
+                        char *password = (char *)"";
+                        if (newline) { *newline = '\0'; password = newline + 1; }
+                        connected = try_wifi_connect(ssid, password);
+                        if (!connected) {
+                            wifi_attempts++;
+                            if (wifi_attempts >= 3) {
+                                usb_ll_write("WIFI_GIVE_UP: falling back to USB mode\n");
+                                dsi_modal_show(dsi_panel, "WiFi failed 3x", "USB mode...");
+                                vTaskDelay(pdMS_TO_TICKS(2000));
+                                camera_deinit();
+                                goto usb_mode;
+                            }
+                        }
+                    }
+                }
+                // Check USB serial: "WIFI:SSID:PASSWORD"
+                if (!connected && usb_ll_read_line(usb_line, sizeof(usb_line), 100)) {
+                    if (strncmp(usb_line, "WIFI:", 5) == 0) {
+                        char *ssid = usb_line + 5;
+                        char *colon = strchr(ssid, ':');
+                        char *password = (char *)"";
+                        if (colon) { *colon = '\0'; password = colon + 1; }
+                        connected = try_wifi_connect(ssid, password);
+                    } else if (strncmp(usb_line, "USB", 3) == 0) {
+                        usb_ll_write("USB_MODE\n");
+                        camera_deinit();
+                        goto usb_mode;
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+
+        // Phase 2: Scan Project QR codes in a loop
+        while (true) {
+            usb_ll_write("SCAN_PROJECT_QR\n");
+
+            bool project_found = false;
+            while (!project_found) {
+                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, "Scan Project QR")) {
+                    // Check for Project QR: "S:PROJECT_ID"
+                    if (qr_buf[0] == 'S' && qr_buf[1] == ':') {
+                        const char *project_id = qr_buf + 2;
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "PROJECT: %.64s\n", project_id);
+                        usb_ll_write(msg);
+
+                        // Stop camera and show download modal
+                        camera_deinit();
+                        dsi_modal_show(dsi_panel, "Downloading...", project_id);
+
+                        // Download project
+                        free_assets();
+                        if (qr_download_project(project_id)) {
+                            // Disconnect WiFi before running (SDIO conflicts with dual-core rendering)
+                            wifi_disconnect();
+                            dsi_modal_show(dsi_panel, "Starting!", nullptr);
+                            vTaskDelay(pdMS_TO_TICKS(500));
+
+                            // Run project
+                            load_and_run();
+
+                            // Wait for runtime to finish
+                            while (scratch_running) {
+                                vTaskDelay(pdMS_TO_TICKS(100));
+                            }
+                            usb_ll_write("PROJECT_DONE\n");
+                        } else {
+                            usb_ll_write("DL_FAIL\n");
+                            dsi_modal_show(dsi_panel, "Download Failed", "Try again...");
+                            vTaskDelay(pdMS_TO_TICKS(3000));
+                        }
+
+                        // Restart camera for next QR scan
+                        camera_init();
+                        project_found = true;
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+    }
+usb_mode:
+#endif // USE_QR_MODE && USE_DSI_DISPLAY
+
+    // ============================================================
+    // USB Serial Mode (fallback / SPI LCD mode)
+    // ============================================================
     char line[256];
     while (true) {
         usb_ll_write("WAITING\n");
@@ -551,56 +827,8 @@ extern "C" void app_main(void)
         while (true) {
             if (!usb_ll_read_line(line, sizeof(line), 60000)) continue;
 
-            if (strcmp(line, "LCD") == 0) {
-                // Step-by-step LCD GPIO test
-                const gpio_num_t SCLK = GPIO_NUM_21, MOSI_PIN = GPIO_NUM_38,
-                                 CS = GPIO_NUM_19, DC = GPIO_NUM_35, RST = GPIO_NUM_37;
-                for (auto p : {SCLK, MOSI_PIN, CS, DC, RST}) {
-                    gpio_reset_pin(p);
-                    gpio_set_direction(p, GPIO_MODE_OUTPUT);
-                }
-                gpio_set_level(CS, 1);
-                gpio_set_level(SCLK, 0);
-
-                auto spi_byte = [&](uint8_t b) {
-                    for (int i = 7; i >= 0; i--) {
-                        gpio_set_level(MOSI_PIN, (b >> i) & 1);
-                        esp_rom_delay_us(100);
-                        gpio_set_level(SCLK, 1);
-                        esp_rom_delay_us(100);
-                        gpio_set_level(SCLK, 0);
-                        esp_rom_delay_us(100);
-                    }
-                };
-                auto cmd = [&](uint8_t c) {
-                    gpio_set_level(DC, 0); gpio_set_level(CS, 0);
-                    spi_byte(c);
-                    gpio_set_level(CS, 1);
-                };
-                auto dat = [&](uint8_t d) {
-                    gpio_set_level(DC, 1); gpio_set_level(CS, 0);
-                    spi_byte(d);
-                    gpio_set_level(CS, 1);
-                };
-
-                // Test 1: RST toggle - screen should flicker
-                usb_ll_write("T1:RST\n");
-                gpio_set_level(RST, 0); vTaskDelay(pdMS_TO_TICKS(500));
-                gpio_set_level(RST, 1); vTaskDelay(pdMS_TO_TICKS(500));
-                usb_ll_write("T1:DONE\n");
-
-                // Test 2: Init + display invert - white should become black
-                usb_ll_write("T2:INIT\n");
-                cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150));  // SW reset
-                cmd(0x11); vTaskDelay(pdMS_TO_TICKS(200));  // Sleep out
-                cmd(0x29); vTaskDelay(pdMS_TO_TICKS(100));  // Display ON
-                cmd(0x21); vTaskDelay(pdMS_TO_TICKS(100));  // Display INVERT
-                usb_ll_write("T2:DONE\n");
-                continue;
-            }
             if (strcmp(line, "START") == 0) {
                 load_and_run();
-                // Wait for runtime task to finish before looping back
                 while (scratch_running) {
                     vTaskDelay(pdMS_TO_TICKS(100));
                 }
