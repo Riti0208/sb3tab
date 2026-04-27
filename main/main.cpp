@@ -39,6 +39,7 @@
 #include "sd_storage.h"
 #include "gamepad.h"
 #include "es8388_audio.h"
+#include "ui_menu.h"
 #include <input.hpp>
 
 // Build for DSI (Tab5) or SPI LCD
@@ -800,6 +801,95 @@ static bool qr_download_project(const char *project_id)
 // Main
 // ============================================================
 
+// ============================================================
+// Load game from SD card into runtime structures
+// ============================================================
+
+static void sd_asset_load_cb(const char *name, const uint8_t *data, size_t len, void *ctx)
+{
+    // Copy asset data (callback data is temporary)
+    uint8_t *copy = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (copy) {
+        memcpy(copy, data, len);
+        g_assets.push_back({std::string(name), copy, len});
+    }
+}
+
+static bool load_game_from_sd(const char *project_id)
+{
+    free_assets();
+
+    size_t json_len = 0;
+    char *json_str = sd_load_game(project_id, &json_len, sd_asset_load_cb, nullptr);
+    if (!json_str) return false;
+
+    if (g_project_json) delete g_project_json;
+    g_project_json = new nlohmann::json();
+    try {
+        *g_project_json = nlohmann::json::parse(json_str, json_str + json_len);
+    } catch (...) {
+        ESP_LOGE(TAG, "Failed to parse project JSON from SD");
+        heap_caps_free(json_str);
+        delete g_project_json;
+        g_project_json = nullptr;
+        return false;
+    }
+    heap_caps_free(json_str);
+    return true;
+}
+
+// ============================================================
+// Save downloaded project to SD card
+// ============================================================
+
+static void save_current_project_to_sd(const char *project_id)
+{
+    if (!g_project_json || g_assets.empty()) return;
+
+    std::string json_str = g_project_json->dump();
+
+    // Build SdAsset array
+    std::vector<SdAsset> sd_assets(g_assets.size());
+    for (size_t i = 0; i < g_assets.size(); i++) {
+        sd_assets[i].name = g_assets[i].name.c_str();
+        sd_assets[i].data = g_assets[i].data;
+        sd_assets[i].len = g_assets[i].len;
+    }
+
+    sd_save_game(project_id, project_id,
+                 json_str.c_str(), json_str.size(),
+                 sd_assets.data(), (int)sd_assets.size());
+}
+
+// ============================================================
+// In-game gamepad polling for Start/Select
+// ============================================================
+
+static void game_overlay_check()
+{
+    GamepadState gs = gamepad_get_state();
+
+    // Start → exit confirm
+    if (gs.buttons & XBOX_START) {
+        // Wait for release first
+        while (gamepad_get_state().buttons & XBOX_START) vTaskDelay(pdMS_TO_TICKS(20));
+
+        if (ui_show_exit_confirm()) {
+            scratch_running = false;
+        }
+    }
+
+    // Back/Select → show button map
+    if (gs.buttons & XBOX_BACK) {
+        while (gamepad_get_state().buttons & XBOX_BACK) vTaskDelay(pdMS_TO_TICKS(20));
+        ui_show_button_map();
+    }
+}
+
+// ============================================================
+// Main
+// ============================================================
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Scratcher - ScratchEverywhere on ESP32-P4");
@@ -816,210 +906,107 @@ extern "C" void app_main(void)
     renderer = new SWRenderer();
 
 #if USE_DSI_DISPLAY
-    usb_ll_write("DSI_INIT_START\n");
     dsi_panel = dsi_display_init();
-    if (dsi_panel) {
-        usb_ll_write("DSI_INIT_OK\n");
-    } else {
-        usb_ll_write("DSI_INIT_FAIL\n");
-    }
-
-    // Initialize ES8388 audio codec (uses g_i2c_bus from dsi_display_init)
-    if (es8388_audio_init()) {
-        usb_ll_write("ES8388_INIT_OK\n");
-    } else {
-        usb_ll_write("ES8388_INIT_FAIL\n");
-    }
-
+    es8388_audio_init();
 #else
     lcd_fb = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
-    usb_ll_write("LCD_INIT_START\n");
     lcd_panel = lcd_init();
-    if (lcd_panel) {
-        usb_ll_write("LCD_INIT_OK\n");
-    } else {
-        usb_ll_write("LCD_INIT_FAIL\n");
-    }
 #endif
 
     vTaskDelay(pdMS_TO_TICKS(500));
-
-    // Initialize USB Host gamepad (after DSI init + delay ensures display is up)
-    usb_ll_write("GAMEPAD_INIT_START\n");
     gamepad_init();
-    usb_ll_write("GAMEPAD_INIT_DONE\n");
+    sd_init();
 
-#if USE_QR_MODE && USE_DSI_DISPLAY
-    // ============================================================
-    // QR Scan Mode: Camera → WiFi QR → Project QR → Download → Run
-    // ============================================================
+#if USE_DSI_DISPLAY
+    // Boot-time WiFi connection (try saved credentials)
     {
-        usb_ll_write("QR_MODE_START\n");
-
-        // Initialize WiFi subsystem
         wifi_init();
-
-        char qr_buf[512];
-        char connected_ssid[64] = {};
-        char connected_pass[128] = {};
-
-        // Initialize SD card (for saving/loading WiFi credentials)
-        sd_init();
-
-        // Phase 1: Connect WiFi (try saved credentials first, then QR scan)
-        usb_ll_write("SCAN_WIFI_QR\n");
-        {
-            char usb_line[256];
-
-            auto try_wifi_connect = [&](const char *ssid, const char *password) -> bool {
-                char msg[128];
-                snprintf(msg, sizeof(msg), "WIFI_CONNECTING: %.64s\n", ssid);
-                usb_ll_write(msg);
-                dsi_modal_show(dsi_panel, "Connecting...", ssid);
-
-                if (wifi_connect(ssid, password, 15000)) {
-                    usb_ll_write("WIFI_OK\n");
-                    dsi_modal_show(dsi_panel, "WiFi OK!", ssid);
-                    vTaskDelay(pdMS_TO_TICKS(1500));
-                    memset(connected_ssid, 0, sizeof(connected_ssid));
-                    memset(connected_pass, 0, sizeof(connected_pass));
-                    memcpy(connected_ssid, ssid, strnlen(ssid, sizeof(connected_ssid) - 1));
-                    memcpy(connected_pass, password, strnlen(password, sizeof(connected_pass) - 1));
-                    return true;
-                } else {
-                    usb_ll_write("WIFI_FAIL\n");
-                    dsi_modal_show(dsi_panel, "WiFi Failed", "Try again...");
-                    vTaskDelay(pdMS_TO_TICKS(2000));
-                    return false;
-                }
-            };
-
-            bool connected = false;
-
-            // Try saved WiFi credentials from SD card
-            char saved_ssid[64], saved_pass[128];
-            if (sd_load_wifi(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass))) {
-                usb_ll_write("SAVED_WIFI_FOUND\n");
-                connected = try_wifi_connect(saved_ssid, saved_pass);
-            }
-
-            // Fall back to QR scan / USB serial
-            if (!connected) {
-                // Initialize camera for QR scanning
-                if (!camera_init()) {
-                    usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
-                    goto usb_mode;
-                }
-            }
-
-            int wifi_attempts = 0;
-            while (!connected) {
-                // Check QR camera
-                char qr_banner[128];
-                snprintf(qr_banner, sizeof(qr_banner), "Scan WiFi QR | %s", gamepad_last_msg());
-                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, qr_banner)) {
-                    if (qr_buf[0] == 'W' && qr_buf[1] == ':') {
-                        char *ssid = qr_buf + 2;
-                        char *newline = strchr(ssid, '\n');
-                        char *password = (char *)"";
-                        if (newline) { *newline = '\0'; password = newline + 1; }
-                        connected = try_wifi_connect(ssid, password);
-                        if (!connected) {
-                            wifi_attempts++;
-                            if (wifi_attempts >= 3) {
-                                usb_ll_write("WIFI_GIVE_UP: falling back to USB mode\n");
-                                dsi_modal_show(dsi_panel, "WiFi failed 3x", "USB mode...");
-                                vTaskDelay(pdMS_TO_TICKS(2000));
-                                camera_deinit();
-                                goto usb_mode;
-                            }
-                        }
-                    }
-                }
-                // Check USB serial: "WIFI:SSID:PASSWORD"
-                if (!connected && usb_ll_read_line(usb_line, sizeof(usb_line), 100)) {
-                    if (strncmp(usb_line, "WIFI:", 5) == 0) {
-                        char *ssid = usb_line + 5;
-                        char *colon = strchr(ssid, ':');
-                        char *password = (char *)"";
-                        if (colon) { *colon = '\0'; password = colon + 1; }
-                        connected = try_wifi_connect(ssid, password);
-                    } else if (strncmp(usb_line, "USB", 3) == 0) {
-                        usb_ll_write("USB_MODE\n");
-                        camera_deinit();
-                        goto usb_mode;
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-
-        }
-
-        // Ensure camera is initialized for project QR scanning
-        if (!camera_init()) {
-            usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
-            goto usb_mode;
-        }
-
-        // Phase 2: Scan Project QR codes in a loop
-        while (true) {
-            usb_ll_write("SCAN_PROJECT_QR\n");
-
-            bool project_found = false;
-            while (!project_found) {
-                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, "Scan Project QR")) {
-                    // Check for Project QR: "S:PROJECT_ID"
-                    if (qr_buf[0] == 'S' && qr_buf[1] == ':') {
-                        const char *project_id = qr_buf + 2;
-                        char msg[128];
-                        snprintf(msg, sizeof(msg), "PROJECT: %.64s\n", project_id);
-                        usb_ll_write(msg);
-
-                        // Stop camera and show download modal
-                        camera_deinit();
-                        dsi_modal_show(dsi_panel, "Downloading...", project_id);
-
-                        // Download project
-                        free_assets();
-                        if (qr_download_project(project_id)) {
-                            // Disconnect WiFi before running (SDIO conflicts with dual-core rendering)
-                            wifi_disconnect();
-
-                            // Save WiFi credentials after WiFi is disconnected (SDMMC conflict avoidance)
-                            sd_save_wifi(connected_ssid, connected_pass);
-
-                            dsi_modal_show(dsi_panel, "Starting!", nullptr);
-                            vTaskDelay(pdMS_TO_TICKS(500));
-
-                            // Run project
-                            load_and_run();
-
-                            // Wait for runtime to finish
-                            while (scratch_running) {
-                                vTaskDelay(pdMS_TO_TICKS(100));
-                            }
-                            usb_ll_write("PROJECT_DONE\n");
-                        } else {
-                            usb_ll_write("DL_FAIL\n");
-                            dsi_modal_show(dsi_panel, "Download Failed", "Try again...");
-                            vTaskDelay(pdMS_TO_TICKS(3000));
-                        }
-
-                        // Restart camera for next QR scan
-                        camera_init();
-                        project_found = true;
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
+        char saved_ssid[64] = {}, saved_pass[128] = {};
+        if (sd_load_wifi(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass))) {
+            dsi_modal_show(dsi_panel, "Connecting WiFi...", saved_ssid);
+            if (wifi_connect(saved_ssid, saved_pass, 10000)) {
+                dsi_modal_show(dsi_panel, "WiFi OK!", saved_ssid);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            } else {
+                dsi_modal_show(dsi_panel, "WiFi Failed", "Continue without WiFi");
+                vTaskDelay(pdMS_TO_TICKS(2000));
             }
         }
     }
-usb_mode:
-#endif // USE_QR_MODE && USE_DSI_DISPLAY
 
-    // ============================================================
-    // USB Serial Mode (fallback / SPI LCD mode)
-    // ============================================================
+    // Initialize LVGL menu system
+    ui_init(dsi_panel);
+
+    // Main loop: menu → game → menu → ...
+    while (true) {
+        MenuAction action = ui_menu_run();
+
+        if (action == MenuAction::PLAY_FROM_SD) {
+            const char *pid = ui_get_selected_project_id();
+            dsi_modal_show(dsi_panel, "Loading...", pid);
+
+            if (!load_game_from_sd(pid)) {
+                dsi_modal_show(dsi_panel, "Load Failed", nullptr);
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                ui_resume();
+                continue;
+            }
+        } else if (action == MenuAction::PLAY_FROM_QR) {
+            const char *pid = ui_get_selected_project_id();
+
+            // Ensure WiFi is connected before download
+            if (!wifi_is_connected()) {
+                char ssid[64] = {}, pass[128] = {};
+                if (sd_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass))) {
+                    dsi_modal_show(dsi_panel, "Connecting WiFi...", ssid);
+                    if (!wifi_connect(ssid, pass, 10000)) {
+                        dsi_modal_show(dsi_panel, "WiFi Failed", nullptr);
+                        vTaskDelay(pdMS_TO_TICKS(2000));
+                        ui_resume();
+                        continue;
+                    }
+                }
+            }
+
+            dsi_modal_show(dsi_panel, "Downloading...", pid);
+
+            if (!qr_download_project(pid)) {
+                dsi_modal_show(dsi_panel, "Download Failed", nullptr);
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                wifi_disconnect();
+                ui_resume();
+                continue;
+            }
+
+            // Disconnect WiFi before game (SDIO conflicts)
+            wifi_disconnect();
+
+            // Save to SD for future use
+            save_current_project_to_sd(pid);
+        } else {
+            continue;
+        }
+
+        // Suspend LVGL and run the game
+        ui_suspend();
+        dsi_modal_show(dsi_panel, "Starting!", nullptr);
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        if (load_and_run()) {
+            // Game loop: check for Start/Select overlays
+            while (scratch_running) {
+                game_overlay_check();
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+
+        // Game ended — clean up and return to menu
+        free_assets();
+        ui_resume();
+    }
+
+#else
+    // USB Serial Mode (SPI LCD fallback)
     char line[256];
     while (true) {
         usb_ll_write("WAITING\n");
@@ -1039,4 +1026,5 @@ usb_mode:
             handle_command(line);
         }
     }
+#endif
 }

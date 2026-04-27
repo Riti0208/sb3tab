@@ -6,3 +6,6 @@ bool es8388_audio_init();
 
 // Test: 22050Hz tone through mixer (tests interpolation path)
 void es8388_test_tone_22k();
+
+// Set mute state (true = muted)
+void es8388_set_mute(bool mute);

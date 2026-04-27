@@ -109,9 +109,35 @@ static const uint8_t font5x7[][5] = {
     {0x10,0x08,0x08,0x10,0x08}, // 126 ~
 };
 
-// Draw a single character at (x,y) with scale factor, on RGB565 framebuffer
-static void draw_char(uint16_t *fb, int fb_w, int fb_h,
-                      int x, int y, char c, uint16_t color, int scale)
+// Landscape dimensions (as user sees the Tab5 held horizontally)
+#define LAND_W  DSI_LCD_H   // 1280
+#define LAND_H  DSI_LCD_W   // 720
+
+// Convert landscape coordinate (lx,ly) to portrait framebuffer index
+// Rotation: 270° CW — landscape(lx,ly) → portrait(ly, LAND_W-1-lx)
+static inline void land_to_portrait(int lx, int ly, int &px, int &py) {
+    px = ly;
+    py = LAND_W - 1 - lx;
+}
+
+// Set pixel at landscape coordinate
+static inline void set_pixel_land(uint16_t *fb, int lx, int ly, uint16_t color) {
+    if (lx < 0 || lx >= LAND_W || ly < 0 || ly >= LAND_H) return;
+    int px, py;
+    land_to_portrait(lx, ly, px, py);
+    fb[py * DSI_LCD_W + px] = color;
+}
+
+// Read pixel at landscape coordinate
+static inline uint16_t get_pixel_land(uint16_t *fb, int lx, int ly) {
+    if (lx < 0 || lx >= LAND_W || ly < 0 || ly >= LAND_H) return 0;
+    int px, py;
+    land_to_portrait(lx, ly, px, py);
+    return fb[py * DSI_LCD_W + px];
+}
+
+// Draw a single character at landscape (x,y) with scale factor
+static void draw_char(uint16_t *fb, int x, int y, char c, uint16_t color, int scale)
 {
     if (c < 32 || c > 126) c = '?';
     const uint8_t *glyph = font5x7[c - 32];
@@ -121,11 +147,7 @@ static void draw_char(uint16_t *fb, int fb_w, int fb_h,
             if (bits & (1 << row)) {
                 for (int sy = 0; sy < scale; sy++) {
                     for (int sx = 0; sx < scale; sx++) {
-                        int px = x + col * scale + sx;
-                        int py = y + row * scale + sy;
-                        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h) {
-                            fb[py * fb_w + px] = color;
-                        }
+                        set_pixel_land(fb, x + col * scale + sx, y + row * scale + sy, color);
                     }
                 }
             }
@@ -133,14 +155,13 @@ static void draw_char(uint16_t *fb, int fb_w, int fb_h,
     }
 }
 
-// Draw string at (x,y)
-static void draw_string(uint16_t *fb, int fb_w, int fb_h,
-                         int x, int y, const char *str, uint16_t color, int scale)
+// Draw string at landscape (x,y)
+static void draw_string(uint16_t *fb, int x, int y, const char *str, uint16_t color, int scale)
 {
     int cx = x;
     for (const char *p = str; *p; p++) {
-        draw_char(fb, fb_w, fb_h, cx, y, *p, color, scale);
-        cx += 6 * scale;  // 5px char + 1px gap
+        draw_char(fb, cx, y, *p, color, scale);
+        cx += 6 * scale;
     }
 }
 
@@ -150,15 +171,14 @@ static int string_width(const char *str, int scale) {
     return len > 0 ? len * 6 * scale - scale : 0;
 }
 
-// Fill rectangle
-static void fill_rect(uint16_t *fb, int fb_w, int fb_h,
-                       int x, int y, int w, int h, uint16_t color)
+// Fill rectangle at landscape coordinates
+static void fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t color)
 {
-    for (int py = y; py < y + h && py < fb_h; py++) {
-        if (py < 0) continue;
-        for (int px = x; px < x + w && px < fb_w; px++) {
-            if (px < 0) continue;
-            fb[py * fb_w + px] = color;
+    for (int ly = y; ly < y + h && ly < LAND_H; ly++) {
+        if (ly < 0) continue;
+        for (int lx = x; lx < x + w && lx < LAND_W; lx++) {
+            if (lx < 0) continue;
+            set_pixel_land(fb, lx, ly, color);
         }
     }
 }
@@ -174,36 +194,36 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
     if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) != ESP_OK || !fb0) return;
     uint16_t *fb = (uint16_t *)fb0;
 
-    const int W = DSI_LCD_W;  // 720
-    const int H = DSI_LCD_H;  // 1280
+    // Work in landscape coordinates (1280x720)
+    const int W = LAND_W;
+    const int H = LAND_H;
 
     // Modal box dimensions
-    int box_w = 500;
+    int box_w = 600;
     int box_h = detail ? 200 : 140;
     int box_x = (W - box_w) / 2;
     int box_y = (H - box_h) / 2;
 
     // Dark background overlay (dim entire screen)
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            uint16_t px = fb[y * W + x];
-            // Darken: halve each channel
-            fb[y * W + x] = ((px >> 1) & 0x7BEF);
+    for (int ly = 0; ly < H; ly++) {
+        for (int lx = 0; lx < W; lx++) {
+            uint16_t px = get_pixel_land(fb, lx, ly);
+            set_pixel_land(fb, lx, ly, ((px >> 1) & 0x7BEF));
         }
     }
 
     // Modal box: dark blue-gray background
     uint16_t box_bg = rgb565(30, 30, 50);
     uint16_t border = rgb565(80, 120, 200);
-    fill_rect(fb, W, H, box_x - 2, box_y - 2, box_w + 4, box_h + 4, border);
-    fill_rect(fb, W, H, box_x, box_y, box_w, box_h, box_bg);
+    fill_rect(fb, box_x - 2, box_y - 2, box_w + 4, box_h + 4, border);
+    fill_rect(fb, box_x, box_y, box_w, box_h, box_bg);
 
     // Title text (scale 3 = 21px tall)
     if (title) {
         int tw = string_width(title, 3);
         int tx = box_x + (box_w - tw) / 2;
         int ty = box_y + 30;
-        draw_string(fb, W, H, tx, ty, title, rgb565(255, 255, 255), 3);
+        draw_string(fb, tx, ty, title, rgb565(255, 255, 255), 3);
     }
 
     // Detail text (scale 2 = 14px tall)
@@ -211,10 +231,10 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
         int dw = string_width(detail, 2);
         int dx = box_x + (box_w - dw) / 2;
         int dy = box_y + 90;
-        draw_string(fb, W, H, dx, dy, detail, rgb565(180, 180, 200), 2);
+        draw_string(fb, dx, dy, detail, rgb565(180, 180, 200), 2);
     }
 
-    esp_cache_msync(fb0, W * H * 2,
+    esp_cache_msync(fb0, DSI_LCD_W * DSI_LCD_H * 2,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
@@ -225,24 +245,24 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
     if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) != ESP_OK || !fb0) return;
     uint16_t *fb = (uint16_t *)fb0;
 
-    const int W = DSI_LCD_W;
-    const int H = DSI_LCD_H;
+    const int W = LAND_W;
+    const int H = LAND_H;
 
-    int box_w = 500;
+    int box_w = 600;
     int box_h = 200;
     int box_x = (W - box_w) / 2;
     int box_y = (H - box_h) / 2;
 
     uint16_t box_bg = rgb565(30, 30, 50);
     uint16_t border = rgb565(80, 120, 200);
-    fill_rect(fb, W, H, box_x - 2, box_y - 2, box_w + 4, box_h + 4, border);
-    fill_rect(fb, W, H, box_x, box_y, box_w, box_h, box_bg);
+    fill_rect(fb, box_x - 2, box_y - 2, box_w + 4, box_h + 4, border);
+    fill_rect(fb, box_x, box_y, box_w, box_h, box_bg);
 
     // Title
     if (title) {
         int tw = string_width(title, 3);
         int tx = box_x + (box_w - tw) / 2;
-        draw_string(fb, W, H, tx, box_y + 25, title, rgb565(255, 255, 255), 3);
+        draw_string(fb, tx, box_y + 25, title, rgb565(255, 255, 255), 3);
     }
 
     // Progress bar
@@ -251,17 +271,14 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
     int bar_w = box_w - 80;
     int bar_h = 30;
 
-    // Background
-    fill_rect(fb, W, H, bar_x, bar_y, bar_w, bar_h, rgb565(60, 60, 80));
+    fill_rect(fb, bar_x, bar_y, bar_w, bar_h, rgb565(60, 60, 80));
 
-    // Fill
     if (total > 0) {
         int fill_w = (int)((int64_t)bar_w * current / total);
         if (fill_w > bar_w) fill_w = bar_w;
-        fill_rect(fb, W, H, bar_x, bar_y, fill_w, bar_h, rgb565(60, 180, 80));
+        fill_rect(fb, bar_x, bar_y, fill_w, bar_h, rgb565(60, 180, 80));
     }
 
-    // Percentage text
     char pct[32];
     if (total > 0) {
         snprintf(pct, sizeof(pct), "%d / %d  (%d%%)", current, total,
@@ -270,10 +287,10 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
         snprintf(pct, sizeof(pct), "%d ...", current);
     }
     int pw = string_width(pct, 2);
-    int px = box_x + (box_w - pw) / 2;
-    draw_string(fb, W, H, px, bar_y + bar_h + 15, pct, rgb565(200, 200, 220), 2);
+    int ptx = box_x + (box_w - pw) / 2;
+    draw_string(fb, ptx, bar_y + bar_h + 15, pct, rgb565(200, 200, 220), 2);
 
-    esp_cache_msync(fb0, W * H * 2,
+    esp_cache_msync(fb0, DSI_LCD_W * DSI_LCD_H * 2,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
@@ -284,16 +301,16 @@ void dsi_banner(esp_lcd_panel_handle_t panel, const char *text)
     if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) != ESP_OK || !fb0) return;
     uint16_t *fb = (uint16_t *)fb0;
 
-    const int W = DSI_LCD_W;
-    const int H = DSI_LCD_H;
+    const int W = LAND_W;
+    const int H = LAND_H;
     const int bar_h = 50;
     const int bar_y = H - bar_h;
 
-    // Semi-dark bar at bottom
-    for (int y = bar_y; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            uint16_t px = fb[y * W + x];
-            fb[y * W + x] = ((px >> 1) & 0x7BEF);
+    // Semi-dark bar at bottom (landscape)
+    for (int ly = bar_y; ly < H; ly++) {
+        for (int lx = 0; lx < W; lx++) {
+            uint16_t px = get_pixel_land(fb, lx, ly);
+            set_pixel_land(fb, lx, ly, ((px >> 1) & 0x7BEF));
         }
     }
 
@@ -301,5 +318,5 @@ void dsi_banner(esp_lcd_panel_handle_t panel, const char *text)
     int tw = string_width(text, 3);
     int tx = (W - tw) / 2;
     int ty = bar_y + (bar_h - 21) / 2;
-    draw_string(fb, W, H, tx, ty, text, rgb565(255, 255, 255), 3);
+    draw_string(fb, tx, ty, text, rgb565(255, 255, 255), 3);
 }

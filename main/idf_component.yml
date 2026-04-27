@@ -7,3 +7,4 @@ dependencies:
   espressif/esp_hosted: "~1.4.0"
   espressif/esp_video: "*"
   espressif/quirc: "*"
+  lvgl/lvgl: "~9.2"

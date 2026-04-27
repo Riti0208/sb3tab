@@ -204,3 +204,11 @@ void es8388_test_tone_22k()
     i2s_del_channel(tx);
     ESP_LOGI(TAG, "Direct I2S test done (wrote %d resampled samples)", dst_samples);
 }
+
+void es8388_set_mute(bool mute)
+{
+    if (!s_es8388_dev) return;
+    // DACCONTROL3 bit[5]: DAC soft mute
+    es_write_reg(ES_DACCONTROL3, mute ? 0x24 : 0x00);
+    ESP_LOGI(TAG, "Mute: %s", mute ? "ON" : "OFF");
+}

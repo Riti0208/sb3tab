@@ -151,7 +151,7 @@ static void backlight_init() {
     ESP_ERROR_CHECK(ledc_channel_config(&ch));
 }
 
-static void backlight_set(int percent) {
+void dsi_backlight_set(int percent) {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
     uint32_t duty = (4095 * percent) / 100;
@@ -308,7 +308,7 @@ esp_lcd_panel_handle_t dsi_display_init()
     ESP_LOGI(TAG, "ST7123 panel initialized: %dx%d (24bpp, 70MHz, 965Mbps)", DSI_LCD_W, DSI_LCD_H);
 
     // 10. Backlight ON
-    backlight_set(100);
+    dsi_backlight_set(100);
 
     // 11. Initialize PPA SRM client with async callback
     {

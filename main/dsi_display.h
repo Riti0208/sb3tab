@@ -29,3 +29,6 @@ esp_lcd_panel_handle_t dsi_display_init();
 // With double buffering: scratch_fb must remain valid until next call (PPA reads async)
 void dsi_display_update(esp_lcd_panel_handle_t panel,
                         const uint8_t *scratch_fb, int src_w, int src_h);
+
+// Set backlight brightness (0-100%)
+void dsi_backlight_set(int percent);

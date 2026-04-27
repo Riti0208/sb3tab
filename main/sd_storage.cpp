@@ -4,8 +4,12 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "esp_ldo_regulator.h"
+#include "esp_heap_caps.h"
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/unistd.h>
 
 static const char *TAG = "sd";
 static const char *MOUNT_POINT = "/sd";
@@ -97,4 +101,197 @@ bool sd_load_wifi(char *ssid, int ssid_size, char *password, int password_size)
 
     ESP_LOGI(TAG, "WiFi credentials loaded for '%s'", ssid);
     return true;
+}
+
+// ============================================================
+// Game storage
+// ============================================================
+
+static const char *GAMES_DIR = "/sd/games";
+
+static void ensure_games_dir()
+{
+    struct stat st;
+    if (stat(GAMES_DIR, &st) != 0) {
+        mkdir(GAMES_DIR, 0755);
+    }
+}
+
+void sd_list_games(SdGameList *games)
+{
+    games->count = 0;
+    if (!s_mounted) return;
+    ensure_games_dir();
+
+    DIR *d = opendir(GAMES_DIR);
+    if (!d) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr && games->count < SD_MAX_GAMES) {
+        if (ent->d_type != DT_DIR && ent->d_type != DT_UNKNOWN) continue;
+        if (ent->d_name[0] == '.') continue;
+
+        // Verify it has project.json
+        char path[320];
+        snprintf(path, sizeof(path), "%s/%s/project.json", GAMES_DIR, ent->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+
+        SdGameEntry &e = games->entries[games->count];
+        memset(e.project_id, 0, SD_GAME_ID_LEN);
+        size_t namelen = strlen(ent->d_name);
+        if (namelen >= SD_GAME_ID_LEN) namelen = SD_GAME_ID_LEN - 1;
+        memcpy(e.project_id, ent->d_name, namelen);
+
+        // Try to load name from name.txt
+        snprintf(path, sizeof(path), "%s/%s/name.txt", GAMES_DIR, ent->d_name);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            if (fgets(e.name, SD_GAME_NAME_LEN, f)) {
+                char *nl = strchr(e.name, '\n');
+                if (nl) *nl = '\0';
+            }
+            fclose(f);
+        } else {
+            e.name[0] = '\0';
+        }
+
+        games->count++;
+    }
+    closedir(d);
+    ESP_LOGI(TAG, "Found %d saved games", games->count);
+}
+
+void sd_save_game(const char *project_id, const char *name,
+                  const char *project_json, size_t json_len,
+                  const SdAsset *assets, int asset_count)
+{
+    if (!s_mounted) return;
+    ensure_games_dir();
+
+    char dir[280];
+    snprintf(dir, sizeof(dir), "%s/%s", GAMES_DIR, project_id);
+    mkdir(dir, 0755);
+
+    // Save project.json
+    char path[320];
+    snprintf(path, sizeof(path), "%s/project.json", dir);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fwrite(project_json, 1, json_len, f);
+        fclose(f);
+    }
+
+    // Save name
+    if (name && name[0]) {
+        snprintf(path, sizeof(path), "%s/name.txt", dir);
+        f = fopen(path, "w");
+        if (f) { fprintf(f, "%s\n", name); fclose(f); }
+    }
+
+    // Save assets
+    char assets_dir[300];
+    snprintf(assets_dir, sizeof(assets_dir), "%s/assets", dir);
+    mkdir(assets_dir, 0755);
+
+    for (int i = 0; i < asset_count; i++) {
+        snprintf(path, sizeof(path), "%s/%s", assets_dir, assets[i].name);
+        f = fopen(path, "wb");
+        if (f) {
+            fwrite(assets[i].data, 1, assets[i].len, f);
+            fclose(f);
+        }
+    }
+
+    ESP_LOGI(TAG, "Game saved: %s (%d assets)", project_id, asset_count);
+}
+
+char *sd_load_game(const char *project_id, size_t *json_len,
+                   sd_asset_cb_t asset_cb, void *ctx)
+{
+    if (!s_mounted) return nullptr;
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s/project.json", GAMES_DIR, project_id);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return nullptr;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char *json = (char *)heap_caps_malloc(fsize + 1, MALLOC_CAP_SPIRAM);
+    if (!json) { fclose(f); return nullptr; }
+
+    fread(json, 1, fsize, f);
+    json[fsize] = '\0';
+    fclose(f);
+    *json_len = (size_t)fsize;
+
+    // Load assets
+    if (asset_cb) {
+        char assets_dir[300];
+        snprintf(assets_dir, sizeof(assets_dir), "%s/%s/assets", GAMES_DIR, project_id);
+        DIR *d = opendir(assets_dir);
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+
+                char apath[576];
+                snprintf(apath, sizeof(apath), "%s/%s", assets_dir, ent->d_name);
+                FILE *af = fopen(apath, "rb");
+                if (!af) continue;
+
+                fseek(af, 0, SEEK_END);
+                long asize = ftell(af);
+                fseek(af, 0, SEEK_SET);
+
+                uint8_t *adata = (uint8_t *)heap_caps_malloc(asize, MALLOC_CAP_SPIRAM);
+                if (adata) {
+                    fread(adata, 1, asize, af);
+                    asset_cb(ent->d_name, adata, asize, ctx);
+                    heap_caps_free(adata);
+                }
+                fclose(af);
+            }
+            closedir(d);
+        }
+    }
+
+    ESP_LOGI(TAG, "Game loaded: %s (%ld bytes JSON)", project_id, fsize);
+    return json;
+}
+
+static void remove_dir_recursive(const char *dirpath)
+{
+    DIR *d = opendir(dirpath);
+    if (!d) return;
+
+    struct dirent *ent;
+    char path[320];
+    while ((ent = readdir(d)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "%s/%s", dirpath, ent->d_name);
+
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            remove_dir_recursive(path);
+        } else {
+            unlink(path);
+        }
+    }
+    closedir(d);
+    rmdir(dirpath);
+}
+
+void sd_delete_game(const char *project_id)
+{
+    if (!s_mounted) return;
+
+    char dir[280];
+    snprintf(dir, sizeof(dir), "%s/%s", GAMES_DIR, project_id);
+    remove_dir_recursive(dir);
+    ESP_LOGI(TAG, "Game deleted: %s", project_id);
 }

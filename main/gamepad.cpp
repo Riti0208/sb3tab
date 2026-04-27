@@ -99,9 +99,29 @@ static void parse_xboxone_report(const uint8_t *data, int len)
 // USB transfer callback
 // ============================================================
 
+static int s_xfer_dbg = 0;
+static int s_xfer_ok = 0, s_xfer_fail = 0;
+
 static void in_xfer_cb(usb_transfer_t *xfer)
 {
+    // Log transfer status periodically
+    if (xfer->status == USB_TRANSFER_STATUS_COMPLETED) s_xfer_ok++;
+    else s_xfer_fail++;
+    if ((s_xfer_ok + s_xfer_fail) % 200 == 1) {
+        ESP_LOGI(TAG, "xfer: ok=%d fail=%d status=%d bytes=%d",
+                 s_xfer_ok, s_xfer_fail, xfer->status, xfer->actual_num_bytes);
+    }
+
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
+        // Log raw report when buttons pressed
+        uint8_t *d = xfer->data_buffer;
+        int n = xfer->actual_num_bytes;
+        bool has_btn = (n >= 4 && (d[2] | d[3]) != 0);
+        if (has_btn || (s_xfer_dbg++ % 500 == 0)) {
+            ESP_LOGI(TAG, "raw[%d]: %02X %02X %02X %02X %02X %02X %02X %02X",
+                     n, d[0], n>1?d[1]:0, n>2?d[2]:0, n>3?d[3]:0,
+                     n>4?d[4]:0, n>5?d[5]:0, n>6?d[6]:0, n>7?d[7]:0);
+        }
         if (s_xbox_type == XBOX_360) {
             parse_xbox360_report(xfer->data_buffer, xfer->actual_num_bytes);
         } else if (s_xbox_type == XBOX_ONE) {
@@ -113,7 +133,10 @@ static void in_xfer_cb(usb_transfer_t *xfer)
 
     // Re-submit transfer for next report
     if (s_device_connected) {
-        usb_host_transfer_submit(s_in_xfer);
+        esp_err_t err = usb_host_transfer_submit(s_in_xfer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Re-submit failed: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -269,8 +292,8 @@ static bool try_open_xbox(uint8_t dev_addr)
     }
 
     // Start reading
-    usb_host_transfer_submit(s_in_xfer);
-    ESP_LOGI(TAG, "Gamepad reading started");
+    esp_err_t sub_ret = usb_host_transfer_submit(s_in_xfer);
+    ESP_LOGI(TAG, "Gamepad reading started, submit=%s", esp_err_to_name(sub_ret));
     return true;
 }
 
