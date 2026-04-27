@@ -24,6 +24,7 @@
 #include <cstring>
 #include "quirc.h"
 #include "dsi_modal.h"
+#include "esp_video_isp_ioctl.h"
 
 static const char *TAG = "cam_qr";
 
@@ -73,6 +74,8 @@ static void rgb565_to_gray_half(const uint16_t *src, int src_w, int src_h,
 
 bool camera_init()
 {
+    if (s_cam_fd >= 0) return true;  // Already initialized
+
     // I2C bus for SCCB (sensor control) is already initialized in dsi_display_init()
     extern i2c_master_bus_handle_t g_i2c_bus;
 
@@ -207,6 +210,48 @@ bool camera_init()
     ppa_cfg.max_pending_trans_num = 1;
     ESP_ERROR_CHECK(ppa_register_client(&ppa_cfg, &s_cam_ppa));
 
+    // Manual ISP tuning: white balance + brightness
+    // Note: PPA rgb_swap inverts R↔B, so ISP red_gain → screen blue, ISP blue_gain → screen red
+    int isp_fd = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
+    if (isp_fd >= 0) {
+        // White balance: fix green tint from Bayer BGGR demosaic
+        esp_video_isp_wb_t wb = {};
+        wb.enable = true;
+        wb.red_gain = 1.2f;   // screen blue boost
+        wb.blue_gain = 1.6f;  // screen red boost
+
+        struct v4l2_ext_control control = {};
+        control.id = V4L2_CID_USER_ESP_ISP_WB;
+        control.p_u8 = (uint8_t *)&wb;
+        control.size = sizeof(wb);
+
+        struct v4l2_ext_controls controls = {};
+        controls.ctrl_class = V4L2_CTRL_CLASS_USER;
+        controls.count = 1;
+        controls.controls = &control;
+
+        if (ioctl(isp_fd, VIDIOC_S_EXT_CTRLS, &controls) == 0) {
+            ESP_LOGI(TAG, "ISP WB set: red=%.1f blue=%.1f", wb.red_gain, wb.blue_gain);
+        } else {
+            ESP_LOGW(TAG, "ISP WB set failed");
+        }
+
+        // Brightness: compensate for no auto-exposure (range: -128 to 127)
+        struct v4l2_control brightness = {};
+        brightness.id = V4L2_CID_BRIGHTNESS;
+        brightness.value = 50;
+
+        if (ioctl(isp_fd, VIDIOC_S_CTRL, &brightness) == 0) {
+            ESP_LOGI(TAG, "ISP brightness set: %ld", (long)brightness.value);
+        } else {
+            ESP_LOGW(TAG, "ISP brightness set failed");
+        }
+
+        close(isp_fd);
+    } else {
+        ESP_LOGW(TAG, "Could not open ISP device");
+    }
+
     ESP_LOGI(TAG, "Camera + QR scanner initialized");
     return true;
 }
@@ -249,9 +294,8 @@ static void camera_preview_to_dsi(const uint8_t *cam_frame,
     srm.scale_y = 1.0f;
     srm.mirror_x = false;
     srm.mirror_y = false;
-    srm.rgb_swap = true;   // Match ST7123 panel (same as Scratch rendering)
+    srm.rgb_swap = true;   // ST7123 panel expects R↔B swap
     srm.byte_swap = false;
-    // Note: camera preview has green tint due to ISP AWB not configured — fix later
     srm.alpha_update_mode = PPA_ALPHA_NO_CHANGE;
     srm.mode = PPA_TRANS_MODE_BLOCKING;
 

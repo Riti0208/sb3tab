@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
-         "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp"
+         "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp" "sd_storage.cpp" "gamepad.cpp"
+         "es8388_audio.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -20,6 +21,9 @@ idf_component_register(
         esp_http_client
         esp_video
         quirc
+        fatfs
+        sdmmc
+        usb
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

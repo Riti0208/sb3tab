@@ -201,8 +201,13 @@ void BlockExecutor::executeKeyHats() {
             // TODO: Add a way to register these with macros
             if (data.opcode == "event_whenkeypressed") {
                 std::string key = Scratch::getFieldValue(data, "KEY_OPTION");
-                if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && (Input::keyHeldDuration.find(key)->second == 1 || Input::keyHeldDuration.find(key)->second > 15 * (Scratch::FPS / 30.0f)))
+                if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && Input::keyHeldDuration.find(key)->second == 1) {
+                    // Restart: clear existing repeat queue for this script before re-running
+                    auto chainIt = currentSprite->blockChains.find(data.blockChainID);
+                    if (chainIt != currentSprite->blockChains.end())
+                        chainIt->second.blocksToRepeat.clear();
                     executor.runBlock(data, currentSprite);
+                }
             } else if (data.opcode == "makeymakey_whenMakeyKeyPressed") {
                 std::string key = Input::convertToKey(Scratch::getInputValue(data, "KEY", currentSprite), true);
                 if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && Input::keyHeldDuration.find(key)->second > 0)

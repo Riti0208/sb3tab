@@ -36,6 +36,10 @@
 #include "camera_qr.h"
 #include "wifi_manager.h"
 #include "dsi_modal.h"
+#include "sd_storage.h"
+#include "gamepad.h"
+#include "es8388_audio.h"
+#include <input.hpp>
 
 // Build for DSI (Tab5) or SPI LCD
 #define USE_DSI_DISPLAY 1
@@ -237,6 +241,136 @@ extern "C" void render_set_pen_callbacks(
 extern "C" void render_set_costume_size_callback(
     bool (*)(const char *name, int *w, int *h)
 );
+extern "C" void render_set_input_callback(void (*cb)());
+
+// ============================================================
+// Gamepad → Scratch input callback
+// ============================================================
+
+#define STICK_DEADZONE 8000
+
+static void gamepad_input_callback()
+{
+    GamepadState gs = gamepad_get_state();
+    if (!gs.connected) return;
+
+    uint16_t b = gs.buttons;
+    if (b & XBOX_DPAD_UP)    Input::buttonPress("dpadUp");
+    if (b & XBOX_DPAD_DOWN)  Input::buttonPress("dpadDown");
+    if (b & XBOX_DPAD_LEFT)  Input::buttonPress("dpadLeft");
+    if (b & XBOX_DPAD_RIGHT) Input::buttonPress("dpadRight");
+    if (b & XBOX_A)          Input::buttonPress("A");
+    if (b & XBOX_B)          Input::buttonPress("B");
+    if (b & XBOX_X)          Input::buttonPress("X");
+    if (b & XBOX_Y)          Input::buttonPress("Y");
+    if (b & XBOX_LB)         Input::buttonPress("shoulderL");
+    if (b & XBOX_RB)         Input::buttonPress("shoulderR");
+    if (b & XBOX_START)      Input::buttonPress("start");
+    if (b & XBOX_BACK)       Input::buttonPress("back");
+    if (b & XBOX_LSTICK)     Input::buttonPress("LeftStickPressed");
+    if (b & XBOX_RSTICK)     Input::buttonPress("RightStickPressed");
+    if (gs.left_trigger > 128)  Input::buttonPress("LT");
+    if (gs.right_trigger > 128) Input::buttonPress("RT");
+
+    // Left stick → directional input
+    if (gs.lx > STICK_DEADZONE)  Input::buttonPress("LeftStickRight");
+    if (gs.lx < -STICK_DEADZONE) Input::buttonPress("LeftStickLeft");
+    if (gs.ly > STICK_DEADZONE)  Input::buttonPress("LeftStickUp");
+    if (gs.ly < -STICK_DEADZONE) Input::buttonPress("LeftStickDown");
+
+    // Right stick
+    if (gs.rx > STICK_DEADZONE)  Input::buttonPress("RightStickRight");
+    if (gs.rx < -STICK_DEADZONE) Input::buttonPress("RightStickLeft");
+    if (gs.ry > STICK_DEADZONE)  Input::buttonPress("RightStickUp");
+    if (gs.ry < -STICK_DEADZONE) Input::buttonPress("RightStickDown");
+}
+
+// ============================================================
+// Auto-map gamepad buttons based on keys used in Scratch project
+// ============================================================
+
+static void auto_map_gamepad()
+{
+    // Scan project for used keys (same logic as controlsMenu.cpp)
+    std::vector<std::string> used_keys;
+    for (auto &sprite : Scratch::sprites) {
+        for (auto &block : sprite->blocks) {
+            std::string key;
+            if (block.opcode == "sensing_keypressed") {
+                key = Input::convertToKey(Scratch::getInputValue(block, "KEY_OPTION", sprite));
+            } else if (block.opcode == "event_whenkeypressed") {
+                key = Input::convertToKey(Value(Scratch::getFieldValue(block, "KEY_OPTION")));
+            } else continue;
+            if (!key.empty() && key != "any" &&
+                std::find(used_keys.begin(), used_keys.end(), key) == used_keys.end()) {
+                used_keys.push_back(key);
+            }
+        }
+    }
+
+    if (used_keys.empty()) return;
+
+    // Build smart mapping: arrow keys → D-pad, common keys → face buttons
+    Input::inputControls.clear();
+
+    // Always map D-pad to arrow keys and left stick
+    Input::inputControls["dpadUp"] = "up arrow";
+    Input::inputControls["dpadDown"] = "down arrow";
+    Input::inputControls["dpadLeft"] = "left arrow";
+    Input::inputControls["dpadRight"] = "right arrow";
+    Input::inputControls["LeftStickUp"] = "up arrow";
+    Input::inputControls["LeftStickDown"] = "down arrow";
+    Input::inputControls["LeftStickLeft"] = "left arrow";
+    Input::inputControls["LeftStickRight"] = "right arrow";
+
+    // Collect non-arrow keys that need mapping to face buttons
+    std::vector<std::string> remaining;
+    for (auto &k : used_keys) {
+        if (k == "up arrow" || k == "down arrow" || k == "left arrow" || k == "right arrow")
+            continue;
+        remaining.push_back(k);
+    }
+
+    // Priority mapping for common keys
+    // "space" → A (most common action button in Scratch)
+    // "w"/"up arrow" already handled by D-pad
+    const char *face_buttons[] = {"A", "B", "X", "Y", "shoulderL", "shoulderR", "LT", "RT", "start", "back"};
+    int face_idx = 0;
+
+    // Map "space" to A first if used
+    auto space_it = std::find(remaining.begin(), remaining.end(), "space");
+    if (space_it != remaining.end()) {
+        Input::inputControls["A"] = "space";
+        remaining.erase(space_it);
+        face_idx = 1; // skip A
+    }
+
+    // WASD → D-pad (alternative arrow mapping)
+    auto map_wasd = [&](const char *key, const char *btn) {
+        auto it = std::find(remaining.begin(), remaining.end(), std::string(key));
+        if (it != remaining.end()) {
+            Input::inputControls[btn] = key;
+            remaining.erase(it);
+        }
+    };
+    map_wasd("w", "dpadUp");
+    map_wasd("s", "dpadDown");
+    map_wasd("a", "dpadLeft");
+    map_wasd("d", "dpadRight");
+
+    // Map remaining keys to face buttons in order
+    for (auto &k : remaining) {
+        if (face_idx >= 10) break;
+        Input::inputControls[face_buttons[face_idx]] = k;
+        face_idx++;
+    }
+
+    // Log the mapping
+    ESP_LOGI("automap", "Auto-mapped %zu keys from project:", used_keys.size());
+    for (auto &[btn, key] : Input::inputControls) {
+        ESP_LOGI("automap", "  %s → %s", btn.c_str(), key.c_str());
+    }
+}
 
 static void pen_init_cb() { if (renderer) renderer->initPenLayer(); }
 static void pen_clear_cb() { if (renderer) renderer->clearPenLayer(); }
@@ -304,11 +438,19 @@ static void render_helper_task(void *param) {
                 if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
                 if (idx % 2 == 0) {  // Even sprites on Core 0
                     const auto &cos = sprite->costumes[cosIdx];
+                    float dir = sprite->rotation;
+                    bool flip = false;
+                    if (sprite->rotationStyle == Sprite::RotationStyle::LEFT_RIGHT) {
+                        flip = (dir < 0);
+                        dir = 90.0f; // no rotation
+                    } else if (sprite->rotationStyle == Sprite::RotationStyle::NONE) {
+                        dir = 90.0f; // no rotation
+                    }
                     s_helper_state.renderer->drawSprite(cos.fullName,
                         sprite->xPosition, sprite->yPosition,
-                        sprite->rotation, sprite->size,
+                        dir, sprite->size,
                         sprite->visible, sprite->ghostEffect,
-                        sprite->brightnessEffect);
+                        sprite->brightnessEffect, flip);
                 }
                 idx++;
             }
@@ -363,11 +505,19 @@ static void scratch_runtime_task(void *param)
                     if (cosIdx < 0 || cosIdx >= (int)sprite->costumes.size()) continue;
                     if (idx % 2 == 1) {
                         const auto &cos = sprite->costumes[cosIdx];
+                        float dir = sprite->rotation;
+                        bool flip = false;
+                        if (sprite->rotationStyle == Sprite::RotationStyle::LEFT_RIGHT) {
+                            flip = (dir < 0);
+                            dir = 90.0f;
+                        } else if (sprite->rotationStyle == Sprite::RotationStyle::NONE) {
+                            dir = 90.0f;
+                        }
                         renderer->drawSprite(cos.fullName,
                                              sprite->xPosition, sprite->yPosition,
-                                             sprite->rotation, sprite->size,
+                                             dir, sprite->size,
                                              sprite->visible, sprite->ghostEffect,
-                                             sprite->brightnessEffect);
+                                             sprite->brightnessEffect, flip);
                     }
                     idx++;
                 }
@@ -447,6 +597,7 @@ static bool load_and_run()
         Render::Init();
         render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
         render_set_costume_size_callback(costume_size_cb);
+        render_set_input_callback(gamepad_input_callback);
         render_initialized = true;
     }
 
@@ -498,6 +649,9 @@ static bool load_and_run()
     Scratch::turbo = true;
     Scratch::accurateCollision = false;  // No bitmask images on headless; use fast AABB collision
     Scratch::initializeScratchProject();
+
+    // Auto-map gamepad buttons based on keys used in project
+    auto_map_gamepad();
 
     scratch_running = true;
     xTaskCreatePinnedToCore(scratch_runtime_task, "scratch_rt", 65536, nullptr, 5, nullptr, 1);
@@ -669,6 +823,14 @@ extern "C" void app_main(void)
     } else {
         usb_ll_write("DSI_INIT_FAIL\n");
     }
+
+    // Initialize ES8388 audio codec (uses g_i2c_bus from dsi_display_init)
+    if (es8388_audio_init()) {
+        usb_ll_write("ES8388_INIT_OK\n");
+    } else {
+        usb_ll_write("ES8388_INIT_FAIL\n");
+    }
+
 #else
     lcd_fb = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
     usb_ll_write("LCD_INIT_START\n");
@@ -682,6 +844,11 @@ extern "C" void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    // Initialize USB Host gamepad (after DSI init + delay ensures display is up)
+    usb_ll_write("GAMEPAD_INIT_START\n");
+    gamepad_init();
+    usb_ll_write("GAMEPAD_INIT_DONE\n");
+
 #if USE_QR_MODE && USE_DSI_DISPLAY
     // ============================================================
     // QR Scan Mode: Camera → WiFi QR → Project QR → Download → Run
@@ -692,19 +859,19 @@ extern "C" void app_main(void)
         // Initialize WiFi subsystem
         wifi_init();
 
-        // Initialize camera
-        if (!camera_init()) {
-            usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
-            goto usb_mode;
-        }
-
         char qr_buf[512];
+        char connected_ssid[64] = {};
+        char connected_pass[128] = {};
 
-        // Phase 1: Scan WiFi QR code (also accepts USB serial: WIFI:SSID:PASSWORD)
+        // Initialize SD card (for saving/loading WiFi credentials)
+        sd_init();
+
+        // Phase 1: Connect WiFi (try saved credentials first, then QR scan)
         usb_ll_write("SCAN_WIFI_QR\n");
         {
             char usb_line[256];
-            auto try_wifi_connect = [&](char *ssid, char *password) -> bool {
+
+            auto try_wifi_connect = [&](const char *ssid, const char *password) -> bool {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "WIFI_CONNECTING: %.64s\n", ssid);
                 usb_ll_write(msg);
@@ -714,6 +881,10 @@ extern "C" void app_main(void)
                     usb_ll_write("WIFI_OK\n");
                     dsi_modal_show(dsi_panel, "WiFi OK!", ssid);
                     vTaskDelay(pdMS_TO_TICKS(1500));
+                    memset(connected_ssid, 0, sizeof(connected_ssid));
+                    memset(connected_pass, 0, sizeof(connected_pass));
+                    memcpy(connected_ssid, ssid, strnlen(ssid, sizeof(connected_ssid) - 1));
+                    memcpy(connected_pass, password, strnlen(password, sizeof(connected_pass) - 1));
                     return true;
                 } else {
                     usb_ll_write("WIFI_FAIL\n");
@@ -724,10 +895,29 @@ extern "C" void app_main(void)
             };
 
             bool connected = false;
+
+            // Try saved WiFi credentials from SD card
+            char saved_ssid[64], saved_pass[128];
+            if (sd_load_wifi(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass))) {
+                usb_ll_write("SAVED_WIFI_FOUND\n");
+                connected = try_wifi_connect(saved_ssid, saved_pass);
+            }
+
+            // Fall back to QR scan / USB serial
+            if (!connected) {
+                // Initialize camera for QR scanning
+                if (!camera_init()) {
+                    usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
+                    goto usb_mode;
+                }
+            }
+
             int wifi_attempts = 0;
             while (!connected) {
                 // Check QR camera
-                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, "Scan WiFi QR")) {
+                char qr_banner[128];
+                snprintf(qr_banner, sizeof(qr_banner), "Scan WiFi QR | %s", gamepad_last_msg());
+                if (camera_scan_qr(qr_buf, sizeof(qr_buf), dsi_panel, qr_banner)) {
                     if (qr_buf[0] == 'W' && qr_buf[1] == ':') {
                         char *ssid = qr_buf + 2;
                         char *newline = strchr(ssid, '\n');
@@ -762,6 +952,13 @@ extern "C" void app_main(void)
                 }
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
+
+        }
+
+        // Ensure camera is initialized for project QR scanning
+        if (!camera_init()) {
+            usb_ll_write("ERR:camera init failed, falling back to USB mode\n");
+            goto usb_mode;
         }
 
         // Phase 2: Scan Project QR codes in a loop
@@ -787,6 +984,10 @@ extern "C" void app_main(void)
                         if (qr_download_project(project_id)) {
                             // Disconnect WiFi before running (SDIO conflicts with dual-core rendering)
                             wifi_disconnect();
+
+                            // Save WiFi credentials after WiFi is disconnected (SDMMC conflict avoidance)
+                            sd_save_wifi(connected_ssid, connected_pass);
+
                             dsi_modal_show(dsi_panel, "Starting!", nullptr);
                             vTaskDelay(pdMS_TO_TICKS(500));
 

@@ -18,13 +18,14 @@
 
 static const char *TAG = "esp32_audio";
 
-// I2S pins for MAX98357
-#define I2S_BCLK_PIN    GPIO_NUM_5
-#define I2S_LRCLK_PIN   GPIO_NUM_6
-#define I2S_DOUT_PIN    GPIO_NUM_8
+// I2S pins for Tab5 ES8388 codec
+#define I2S_MCLK_PIN    GPIO_NUM_30
+#define I2S_BCLK_PIN    GPIO_NUM_27
+#define I2S_LRCLK_PIN   GPIO_NUM_29
+#define I2S_DOUT_PIN    GPIO_NUM_26
 
 // Audio config
-#define AUDIO_SAMPLE_RATE  22050
+#define AUDIO_SAMPLE_RATE  48000
 #define I2S_DMA_BUF_COUNT  4
 #define I2S_DMA_BUF_LEN    1024
 
@@ -94,7 +95,33 @@ static WavHeader parse_wav(const uint8_t *data, size_t len) {
     return h;
 }
 
-// Convert WAV data to 16-bit mono PCM at target sample rate (simple nearest-neighbor resampling)
+// Decode WAV to mono int16 at original sample rate (no resampling)
+static void decode_wav_raw(const uint8_t *data, const WavHeader &wav,
+                           int16_t *out, int num_samples) {
+    const uint8_t *src = data + wav.data_offset;
+    int bytes_per_frame = (wav.bits_per_sample / 8) * wav.num_channels;
+
+    for (int i = 0; i < num_samples; i++) {
+        int offset = i * bytes_per_frame;
+        int32_t sample = 0;
+
+        if (wav.bits_per_sample == 16) {
+            for (int ch = 0; ch < wav.num_channels; ch++) {
+                sample += *(int16_t *)(src + offset + ch * 2);
+            }
+            sample /= wav.num_channels;
+        } else if (wav.bits_per_sample == 8) {
+            for (int ch = 0; ch < wav.num_channels; ch++) {
+                sample += ((int)src[offset + ch] - 128) * 256;
+            }
+            sample /= wav.num_channels;
+        }
+
+        out[i] = (int16_t)std::clamp(sample, (int32_t)-32768, (int32_t)32767);
+    }
+}
+
+// Convert WAV data to 16-bit mono PCM resampled to AUDIO_SAMPLE_RATE with linear interpolation
 static PCMSound decode_wav(const uint8_t *data, size_t len) {
     PCMSound pcm = {};
     WavHeader wav = parse_wav(data, len);
@@ -107,45 +134,50 @@ static PCMSound decode_wav(const uint8_t *data, size_t len) {
              wav.sample_rate, wav.bits_per_sample, wav.num_channels, wav.data_size);
 
     int src_samples = wav.data_size / (wav.bits_per_sample / 8) / wav.num_channels;
-    double ratio = (double)AUDIO_SAMPLE_RATE / wav.sample_rate;
-    int dst_samples = (int)(src_samples * ratio);
 
-    pcm.samples = (int16_t *)heap_caps_malloc(dst_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    if (!pcm.samples) {
-        ESP_LOGE(TAG, "Failed to alloc %d samples", dst_samples);
+    // First decode to raw mono at original rate
+    int16_t *raw = (int16_t *)heap_caps_malloc(src_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!raw) {
+        ESP_LOGE(TAG, "Failed to alloc raw %d samples", src_samples);
         return pcm;
     }
+    decode_wav_raw(data, wav, raw, src_samples);
 
-    const uint8_t *src = data + wav.data_offset;
-    int bytes_per_frame = (wav.bits_per_sample / 8) * wav.num_channels;
+    // Resample to AUDIO_SAMPLE_RATE with linear interpolation
+    if (wav.sample_rate == AUDIO_SAMPLE_RATE) {
+        // No resampling needed
+        pcm.samples = raw;
+        pcm.num_samples = src_samples;
+    } else {
+        double ratio = (double)AUDIO_SAMPLE_RATE / wav.sample_rate;
+        int dst_samples = (int)(src_samples * ratio);
 
-    for (int i = 0; i < dst_samples; i++) {
-        int src_idx = (int)(i / ratio);
-        if (src_idx >= src_samples) src_idx = src_samples - 1;
-
-        int offset = src_idx * bytes_per_frame;
-        int32_t sample = 0;
-
-        if (wav.bits_per_sample == 16) {
-            // Average all channels
-            for (int ch = 0; ch < wav.num_channels; ch++) {
-                sample += *(int16_t *)(src + offset + ch * 2);
-            }
-            sample /= wav.num_channels;
-        } else if (wav.bits_per_sample == 8) {
-            for (int ch = 0; ch < wav.num_channels; ch++) {
-                sample += ((int)src[offset + ch] - 128) * 256;
-            }
-            sample /= wav.num_channels;
+        pcm.samples = (int16_t *)heap_caps_malloc(dst_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        if (!pcm.samples) {
+            ESP_LOGE(TAG, "Failed to alloc resampled %d samples", dst_samples);
+            heap_caps_free(raw);
+            return pcm;
         }
 
-        pcm.samples[i] = (int16_t)std::clamp(sample, (int32_t)-32768, (int32_t)32767);
+        for (int i = 0; i < dst_samples; i++) {
+            double src_pos = i / ratio;
+            int idx0 = (int)src_pos;
+            int idx1 = idx0 + 1;
+            if (idx0 >= src_samples) idx0 = src_samples - 1;
+            if (idx1 >= src_samples) idx1 = src_samples - 1;
+            float frac = (float)(src_pos - idx0);
+
+            pcm.samples[i] = (int16_t)(raw[idx0] * (1.0f - frac) + raw[idx1] * frac);
+        }
+
+        pcm.num_samples = dst_samples;
+        heap_caps_free(raw);
     }
 
-    pcm.num_samples = dst_samples;
     pcm.sample_rate = AUDIO_SAMPLE_RATE;
     pcm.loaded = true;
     pcm.volume = 1.0f;
+
     return pcm;
 }
 
@@ -225,8 +257,8 @@ static void mixer_task(void *param) {
                 if (!snd.playing || !snd.loaded || !snd.samples) continue;
                 any_playing = true;
 
-                // Compute playback rate multiplier from pitch: rate = 2^(pitch/10)
-                // pitch=0 -> 1.0, pitch=10 -> 2.0, pitch=-10 -> 0.5
+                // All sounds are pre-resampled to AUDIO_SAMPLE_RATE in decode_wav
+                // Apply pitch: rate = 2^(pitch/10), default 1.0
                 float rate = (snd.pitch == 0.0f) ? 1.0f : powf(2.0f, snd.pitch / 10.0f);
 
                 // Compute per-channel gain from pan [-100..100]
@@ -272,7 +304,7 @@ static void mixer_task(void *param) {
 
         size_t bytes_written = 0;
         i2s_channel_write(s_i2s_tx, out_buf, buf_samples * 2 * sizeof(int16_t),
-                          &bytes_written, pdMS_TO_TICKS(100));
+                          &bytes_written, portMAX_DELAY);
 
         if (!any_playing) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -289,7 +321,7 @@ bool SoundPlayer::init() {
 
     s_audio_mutex = xSemaphoreCreateMutex();
 
-    // Configure I2S for MAX98357
+    // Configure I2S for Tab5 ES8388
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = I2S_DMA_BUF_COUNT;
     chan_cfg.dma_frame_num = I2S_DMA_BUF_LEN;
@@ -304,7 +336,7 @@ bool SoundPlayer::init() {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
+            .mclk = I2S_MCLK_PIN,
             .bclk = I2S_BCLK_PIN,
             .ws = I2S_LRCLK_PIN,
             .dout = I2S_DOUT_PIN,
@@ -334,7 +366,7 @@ bool SoundPlayer::init() {
              I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN, AUDIO_SAMPLE_RATE);
 
     // Start mixer task
-    xTaskCreatePinnedToCore(mixer_task, "audio_mix", 4096, nullptr, 6, &s_mixer_task, 0);
+    xTaskCreatePinnedToCore(mixer_task, "audio_mix", 8192, nullptr, 6, &s_mixer_task, 1);
 
     return true;
 }

@@ -42,7 +42,8 @@ public:
     // Draw a sprite onto the framebuffer
     void drawSprite(const std::string &costumeMd5ext, float x, float y,
                     float direction, float size, bool visible,
-                    float ghostEffect, float brightnessEffect = 0.0f);
+                    float ghostEffect, float brightnessEffect = 0.0f,
+                    bool flipH = false);
 
     // Draw stage backdrop (no rotation, fills entire stage)
     void drawBackdrop(const std::string &costumeMd5ext);
@@ -94,5 +95,5 @@ private:
 
     void blitRGBA(const CostumePixels &cos, int dstX, int dstY,
                   float scale, float angleDeg, float alpha,
-                  float brightness = 0.0f);
+                  float brightness = 0.0f, bool flipH = false);
 };

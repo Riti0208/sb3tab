@@ -264,7 +264,8 @@ bool SWRenderer::loadCostumeFromMemory(const std::string &name, const uint8_t *d
 
 void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
                             float direction, float size, bool visible,
-                            float ghostEffect, float brightnessEffect) {
+                            float ghostEffect, float brightnessEffect,
+                            bool flipH) {
     if (!visible) return;
     auto it = costumes.find(costumeMd5ext);
     if (it == costumes.end()) return;
@@ -274,7 +275,7 @@ void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
     float scale = size / 100.0f;
 
     blitRGBA(it->second, (int)(STAGE_W / 2.0f + x), (int)(STAGE_H / 2.0f - y),
-             scale, direction - 90.0f, alpha, brightnessEffect);
+             scale, direction - 90.0f, alpha, brightnessEffect, flipH);
 }
 
 void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
@@ -524,7 +525,7 @@ static const uint8_t *s_iram_cached_src[2] = {nullptr, nullptr};
 
 void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
                           float scale, float angleDeg, float alpha,
-                          float brightness) {
+                          float brightness, bool flipH) {
     if (!cos.rgba || scale <= 0.0f) return;
 
     float rad = angleDeg * M_PI / 180.0f;
@@ -614,6 +615,8 @@ void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
             int srcY = srcY_fp >> 16;
             srcX_fp += dSrcX_fp;
             srcY_fp += dSrcY_fp;
+
+            if (flipH) srcX = (int)uw - 1 - srcX;
 
             if ((unsigned)srcX >= uw || (unsigned)srcY >= uh) {
                 dstRow += 3;
