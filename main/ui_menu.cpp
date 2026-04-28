@@ -228,12 +228,6 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     } else if (b & XBOX_B) {
         data->key = LV_KEY_ESC;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_START) {
-        data->key = LV_KEY_NEXT;
-        data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_BACK) {
-        data->key = LV_KEY_PREV;
-        data->state = LV_INDEV_STATE_PRESSED;
     }
 
     // Left stick fallback (with deadzone)
