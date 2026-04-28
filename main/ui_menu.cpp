@@ -42,6 +42,9 @@ static SemaphoreHandle_t s_lvgl_mutex = nullptr;
 
 // (gamepad state read directly in indev callback)
 
+// When true, LVGL flush is a no-op (camera/game owns DPI FB)
+static volatile bool s_flush_disabled = false;
+
 // Menu state
 static MenuState s_state = MenuState::MAIN_MENU;
 static MenuAction s_action = MenuAction::NONE;
@@ -76,6 +79,12 @@ static bool lvgl_ppa_done_cb(ppa_client_handle_t client, ppa_event_data_t *event
 
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+    // Skip flush when camera or game owns the DPI framebuffer
+    if (s_flush_disabled) {
+        lv_display_flush_ready(disp);
+        return;
+    }
+
     // FULL mode: px_map is the complete 1280x720 landscape buffer.
     // PPA SRM rotate 270° → 720x1280 portrait DPI framebuffer.
     void *dpi_fb = nullptr;
@@ -351,7 +360,7 @@ static void on_settings_click(lv_event_t *e) {
 static void build_main_menu()
 {
     if (s_scr_main) {
-        lv_obj_delete(s_scr_main);
+        // old screen deleted by show_screen auto_del
     }
 
     // Clear group for new screen
@@ -427,7 +436,7 @@ static void on_game_list_back(lv_event_t *e) {
 static void build_game_list()
 {
     if (s_scr_games) {
-        lv_obj_delete(s_scr_games);
+        // old screen deleted by show_screen auto_del
     }
     lv_group_remove_all_objs(s_group);
 
@@ -542,7 +551,7 @@ static void on_settings_back(lv_event_t *e) {
 static void build_settings()
 {
     if (s_scr_settings) {
-        lv_obj_delete(s_scr_settings);
+        // old screen deleted by show_screen auto_del
     }
     lv_group_remove_all_objs(s_group);
 
@@ -677,14 +686,162 @@ static void build_settings()
 }
 
 // ============================================================
+// Status / WiFi / Download screens (LVGL-based)
+// ============================================================
+
+static lv_obj_t *s_scr_status = nullptr;
+static lv_obj_t *s_status_title = nullptr;
+static lv_obj_t *s_status_detail = nullptr;
+static lv_obj_t *s_status_spinner = nullptr;
+static lv_obj_t *s_status_bar = nullptr;
+static lv_obj_t *s_status_pct = nullptr;
+
+// Build a generic status screen with title, optional spinner, optional detail
+static void build_status_screen(const char *title, const char *detail, bool show_spinner)
+{
+    s_scr_status = nullptr;  // will be replaced; old screen deleted by lv_screen_load auto_del
+    lv_group_remove_all_objs(s_group);
+
+    s_scr_status = lv_obj_create(nullptr);
+    lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+
+    // Center container
+    lv_obj_t *box = lv_obj_create(s_scr_status);
+    lv_obj_remove_style_all(box);
+    lv_obj_add_style(box, &s_style_btn, 0);
+    lv_obj_set_size(box, 600, 300);
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 16, 0);
+    lv_obj_set_style_pad_all(box, 30, 0);
+
+    // Title
+    s_status_title = lv_label_create(box);
+    lv_label_set_text(s_status_title, title ? title : "");
+    lv_obj_set_style_text_font(s_status_title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_status_title, lv_color_hex(SCRATCH_TEXT), 0);
+    lv_obj_set_style_text_align(s_status_title, LV_TEXT_ALIGN_CENTER, 0);
+
+    // Spinner
+    s_status_spinner = nullptr;
+    if (show_spinner) {
+        s_status_spinner = lv_spinner_create(box);
+        lv_spinner_set_anim_params(s_status_spinner, 1000, 270);
+        lv_obj_set_size(s_status_spinner, 48, 48);
+        lv_obj_set_style_arc_color(s_status_spinner, lv_color_hex(SCRATCH_BLUE), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(s_status_spinner, lv_color_hex(0xD9D9D9), LV_PART_MAIN);
+        lv_obj_set_style_arc_width(s_status_spinner, 6, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(s_status_spinner, 6, LV_PART_MAIN);
+    }
+
+    // Progress bar (hidden by default)
+    s_status_bar = lv_bar_create(box);
+    lv_obj_set_width(s_status_bar, lv_pct(100));
+    lv_obj_set_height(s_status_bar, 20);
+    lv_bar_set_range(s_status_bar, 0, 100);
+    lv_bar_set_value(s_status_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_status_bar, lv_color_hex(0xD9D9D9), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_status_bar, lv_color_hex(SCRATCH_ORANGE), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_status_bar, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_status_bar, 10, LV_PART_INDICATOR);
+    lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
+
+    // Percentage / status text
+    s_status_pct = lv_label_create(box);
+    lv_label_set_text(s_status_pct, "");
+    lv_obj_set_style_text_font(s_status_pct, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_status_pct, lv_color_hex(SCRATCH_TEXT), 0);
+
+    // Detail text
+    s_status_detail = lv_label_create(box);
+    lv_label_set_text(s_status_detail, detail ? detail : "");
+    lv_obj_set_style_text_font(s_status_detail, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_status_detail, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_align(s_status_detail, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+// Confirm dialog screen with A/B buttons
+static volatile int s_confirm_result = -1; // -1=pending, 0=no, 1=yes
+
+static void on_confirm_yes(lv_event_t *e) { s_confirm_result = 1; }
+static void on_confirm_no(lv_event_t *e) { s_confirm_result = 0; }
+
+static void build_confirm_screen(const char *title, const char *detail)
+{
+    // old screen deleted by show_screen auto_del
+    lv_group_remove_all_objs(s_group);
+
+    s_scr_status = lv_obj_create(nullptr);
+    lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+
+    lv_obj_t *box = lv_obj_create(s_scr_status);
+    lv_obj_remove_style_all(box);
+    lv_obj_add_style(box, &s_style_btn, 0);
+    lv_obj_set_size(box, 600, 280);
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 20, 0);
+    lv_obj_set_style_pad_all(box, 30, 0);
+
+    lv_obj_t *ttl = lv_label_create(box);
+    lv_label_set_text(ttl, title);
+    lv_obj_set_style_text_font(ttl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(ttl, lv_color_hex(SCRATCH_TEXT), 0);
+
+    if (detail) {
+        lv_obj_t *dtl = lv_label_create(box);
+        lv_label_set_text(dtl, detail);
+        lv_obj_set_style_text_font(dtl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(dtl, lv_color_hex(0x888888), 0);
+    }
+
+    // Button row
+    lv_obj_t *btn_row = lv_obj_create(box);
+    lv_obj_remove_style_all(btn_row);
+    lv_obj_set_width(btn_row, lv_pct(100));
+    lv_obj_set_height(btn_row, 56);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btn_row, 24, 0);
+
+    // Yes button
+    lv_obj_t *btn_yes = lv_btn_create(btn_row);
+    lv_obj_add_style(btn_yes, &s_style_btn, 0);
+    lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUSED);
+    lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
+    lv_obj_set_size(btn_yes, 160, 48);
+    lv_obj_set_style_bg_color(btn_yes, lv_color_hex(SCRATCH_ORANGE), 0);
+    lv_obj_set_style_text_color(btn_yes, lv_color_hex(SCRATCH_WHITE), 0);
+    lv_obj_add_event_cb(btn_yes, on_confirm_yes, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *lbl_yes = lv_label_create(btn_yes);
+    lv_label_set_text(lbl_yes, LV_SYMBOL_OK "  Yes");
+    lv_obj_center(lbl_yes);
+    lv_group_add_obj(s_group, btn_yes);
+
+    // No button
+    lv_obj_t *btn_no = lv_btn_create(btn_row);
+    lv_obj_add_style(btn_no, &s_style_btn, 0);
+    lv_obj_add_style(btn_no, &s_style_btn_focus, LV_STATE_FOCUSED);
+    lv_obj_add_style(btn_no, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
+    lv_obj_set_size(btn_no, 160, 48);
+    lv_obj_add_event_cb(btn_no, on_confirm_no, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *lbl_no = lv_label_create(btn_no);
+    lv_label_set_text(lbl_no, LV_SYMBOL_CLOSE "  No");
+    lv_obj_center(lbl_no);
+    lv_group_add_obj(s_group, btn_no);
+}
+
+// ============================================================
 // Screen transition helper
 // ============================================================
 
 static void show_screen(lv_obj_t *scr)
 {
-    if (scr) {
-        lv_screen_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
-    }
+    if (!scr) return;
+    // auto_del=true: LVGL safely deletes old screen after transition
+    lv_screen_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 150, 0, true);
 }
 
 // ============================================================
@@ -747,7 +904,7 @@ void ui_init(esp_lcd_panel_handle_t panel)
     s_lvgl_mutex = xSemaphoreCreateMutex();
 
     // Start LVGL handler task
-    xTaskCreatePinnedToCore(lvgl_task_fn, "lvgl", 8192, nullptr, 4, &s_lvgl_task, 1);
+    xTaskCreatePinnedToCore(lvgl_task_fn, "lvgl", 16384, nullptr, 4, &s_lvgl_task, 1);
 
     ESP_LOGI(TAG, "LVGL UI initialized (landscape %dx%d via 270 rotation)",
              DSI_LANDSCAPE_W, DSI_LANDSCAPE_H);
@@ -758,18 +915,21 @@ MenuAction ui_menu_run()
     s_action = MenuAction::NONE;
     s_state = MenuState::MAIN_MENU;
 
-    // Lock LVGL and build main menu
+    // Build main menu (LVGL task may be suspended from previous game)
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
     build_main_menu();
     show_screen(s_scr_main);
     xSemaphoreGive(s_lvgl_mutex);
 
+    // Ensure LVGL flush is enabled
+    s_flush_disabled = false;
+
     // Menu loop: wait for state changes from LVGL callbacks
     while (s_action == MenuAction::NONE) {
         // Handle states that require leaving LVGL (QR scan, etc.)
         if (s_state == MenuState::QR_WIFI) {
-            // WiFi QR scan (only when no WiFi configured)
-            ui_suspend();
+            // WiFi QR scan — disable LVGL flush (camera owns DPI FB)
+            s_flush_disabled = true;
 
             bool wifi_ok = false;
             char ssid[64] = {}, pass[128] = {};
@@ -796,20 +956,22 @@ MenuAction ui_menu_run()
                         }
                     }
                     GamepadState gs = gamepad_get_state();
-                    if (gs.buttons & XBOX_B) break;
+                    if (gs.buttons & (XBOX_B | XBOX_BACK | XBOX_START)) break;
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 camera_deinit();
             }
 
+            // Re-enable LVGL flush
+            s_flush_disabled = false;
+
             if (wifi_ok) {
-                dsi_modal_show(s_panel, "WiFi OK!", ssid);
+                ui_show_wifi_result(true, ssid);
                 sd_save_wifi(ssid, pass);
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
 
             // Back to menu
-            ui_resume();
             s_state = MenuState::MAIN_MENU;
             xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
             build_main_menu();
@@ -819,14 +981,10 @@ MenuAction ui_menu_run()
         }
 
         if (s_state == MenuState::QR_PROJECT) {
-            // Project QR scan — WiFi should already be connected
-            ui_suspend();
-
-            // Check WiFi, prompt if not connected
+            // Check WiFi
             if (!wifi_is_connected()) {
-                dsi_modal_show(s_panel, "No WiFi", "Set up WiFi in Settings first");
+                ui_show_status("No WiFi", "Set up WiFi in Settings first");
                 vTaskDelay(pdMS_TO_TICKS(2000));
-                ui_resume();
                 s_state = MenuState::MAIN_MENU;
                 xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
                 build_main_menu();
@@ -835,31 +993,48 @@ MenuAction ui_menu_run()
                 continue;
             }
 
+            // Disable LVGL flush during camera (camera owns DPI FB)
+            s_flush_disabled = true;
+
             bool got_project = false;
+            ESP_LOGI(TAG, "QR: camera_init...");
             if (camera_init()) {
+                ESP_LOGI(TAG, "QR: camera ready, scanning...");
                 char qr_buf[512];
                 while (!got_project) {
-                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel, "Scan Project QR (B=Back)")) {
+                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel, "Scan Project QR (B/Back=Return)")) {
                         if (qr_buf[0] == 'S' && qr_buf[1] == ':') {
                             snprintf(s_selected_project_id, sizeof(s_selected_project_id), "%.63s", qr_buf + 2);
                             got_project = true;
+                            ESP_LOGI(TAG, "QR: GOT PROJECT %s", s_selected_project_id);
                         }
                     }
+                    if (got_project) break;  // exit immediately
                     GamepadState gs = gamepad_get_state();
-                    if (gs.buttons & XBOX_B) break;
+                    if (gs.buttons & (XBOX_B | XBOX_BACK | XBOX_START)) {
+                        ESP_LOGI(TAG, "QR: back button pressed");
+                        break;
+                    }
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
+                ESP_LOGI(TAG, "QR: calling camera_deinit...");
                 camera_deinit();
+                ESP_LOGI(TAG, "QR: camera_deinit OK");
+            } else {
+                ESP_LOGE(TAG, "QR: camera_init FAILED");
             }
 
+            // Re-enable LVGL flush
+            s_flush_disabled = false;
+
             if (got_project) {
+                ESP_LOGI(TAG, "QR: project=%s", s_selected_project_id);
                 s_action = MenuAction::PLAY_FROM_QR;
                 s_state = MenuState::DOWNLOADING;
                 break;
             }
 
             // Back to menu
-            ui_resume();
             s_state = MenuState::MAIN_MENU;
             xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
             build_main_menu();
@@ -886,20 +1061,16 @@ const char *ui_get_selected_project_id()
 
 void ui_suspend()
 {
-    if (s_lvgl_task) {
-        vTaskSuspend(s_lvgl_task);
-    }
+    s_flush_disabled = true;
 }
 
 void ui_resume()
 {
-    if (s_lvgl_task) {
-        vTaskResume(s_lvgl_task);
-        // Force full redraw
-        xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-        lv_obj_invalidate(lv_screen_active());
-        xSemaphoreGive(s_lvgl_mutex);
-    }
+    s_flush_disabled = false;
+    // Force full redraw on next LVGL tick
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    lv_obj_invalidate(lv_screen_active());
+    xSemaphoreGive(s_lvgl_mutex);
 }
 
 bool ui_show_exit_confirm()
@@ -911,7 +1082,6 @@ bool ui_show_exit_confirm()
     while (true) {
         GamepadState gs = gamepad_get_state();
         if (gs.buttons & XBOX_A) {
-            // Wait for release
             while (gamepad_get_state().buttons & XBOX_A) vTaskDelay(pdMS_TO_TICKS(20));
             return true;
         }
@@ -925,9 +1095,110 @@ bool ui_show_exit_confirm()
 
 void ui_show_button_map()
 {
-    // Show current button mapping on screen
-    // Uses dsi_modal since we're in game context (LVGL suspended)
-    // TODO: build a nicer display from Input::inputControls
     dsi_modal_show(s_panel, "Button Map", "D-Pad:Arrows A:Space");
     vTaskDelay(pdMS_TO_TICKS(3000));
+}
+
+// ============================================================
+// LVGL status screen APIs
+// ============================================================
+
+void ui_show_wifi_connecting(const char *ssid)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_status_screen("Connecting to WiFi...", ssid, true);
+    lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
+    show_screen(s_scr_status);
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+void ui_show_wifi_result(bool ok, const char *ssid)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    if (s_status_title) {
+        lv_label_set_text(s_status_title, ok ? LV_SYMBOL_WIFI "  Connected!" : LV_SYMBOL_CLOSE "  WiFi Failed");
+        lv_obj_set_style_text_color(s_status_title,
+            lv_color_hex(ok ? 0x0FBD8C : 0xFF6680), 0);  // Scratch green / red
+    }
+    if (s_status_spinner) {
+        lv_obj_add_flag(s_status_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_status_detail) {
+        lv_label_set_text(s_status_detail, ssid ? ssid : "");
+    }
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+void ui_show_download_start(const char *project_id)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_status_screen(LV_SYMBOL_DOWNLOAD "  Downloading...", project_id, false);
+    // Show progress bar
+    if (s_status_bar) {
+        lv_obj_clear_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(s_status_bar, 0, LV_ANIM_OFF);
+    }
+    show_screen(s_scr_status);
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+void ui_download_update(const char *status, int current, int total)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    if (s_status_bar && total > 0) {
+        int pct = (int)((int64_t)100 * current / total);
+        lv_bar_set_value(s_status_bar, pct, LV_ANIM_ON);
+    }
+    if (s_status_pct) {
+        if (total > 0) {
+            lv_label_set_text_fmt(s_status_pct, "%s  %d / %d", status ? status : "", current, total);
+        } else {
+            lv_label_set_text_fmt(s_status_pct, "%s  %d ...", status ? status : "", current);
+        }
+    }
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+void ui_show_download_result(bool ok)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    if (s_status_title) {
+        lv_label_set_text(s_status_title, ok ? LV_SYMBOL_OK "  Download Complete!" : LV_SYMBOL_CLOSE "  Download Failed");
+        lv_obj_set_style_text_color(s_status_title,
+            lv_color_hex(ok ? 0x0FBD8C : 0xFF6680), 0);
+    }
+    if (s_status_bar) {
+        if (ok) lv_bar_set_value(s_status_bar, 100, LV_ANIM_ON);
+    }
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+void ui_show_status(const char *title, const char *detail)
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_status_screen(title, detail, false);
+    lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
+    show_screen(s_scr_status);
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
+bool ui_show_confirm(const char *title, const char *detail)
+{
+    s_confirm_result = -1;
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_confirm_screen(title, detail);
+    show_screen(s_scr_status);
+    xSemaphoreGive(s_lvgl_mutex);
+
+    // Block until user responds
+    while (s_confirm_result < 0) {
+        // Also check raw gamepad for B = cancel
+        GamepadState gs = gamepad_get_state();
+        if (gs.buttons & XBOX_B) {
+            while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+            s_confirm_result = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    return s_confirm_result == 1;
 }

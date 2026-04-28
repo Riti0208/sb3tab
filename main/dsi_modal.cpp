@@ -114,10 +114,10 @@ static const uint8_t font5x7[][5] = {
 #define LAND_H  DSI_LCD_W   // 720
 
 // Convert landscape coordinate (lx,ly) to portrait framebuffer index
-// Rotation: 270° CW — landscape(lx,ly) → portrait(ly, LAND_W-1-lx)
+// Rotation: 90° CW — landscape(lx,ly) → portrait(LAND_H-1-ly, lx)
 static inline void land_to_portrait(int lx, int ly, int &px, int &py) {
-    px = ly;
-    py = LAND_W - 1 - lx;
+    px = LAND_H - 1 - ly;
+    py = lx;
 }
 
 // Set pixel at landscape coordinate

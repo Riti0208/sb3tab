@@ -672,7 +672,7 @@ static bool load_and_run()
 static bool qr_download_project(const char *project_id)
 {
     usb_ll_write("DL_START\n");
-    dsi_modal_show(dsi_panel, "Fetching info...", project_id);
+    ui_download_update("Fetching info...", 0, 0);
 
     // Step 1: Get project token from API
     char url[256];
@@ -702,7 +702,7 @@ static bool qr_download_project(const char *project_id)
     }
 
     // Step 2: Download project.json
-    dsi_modal_show(dsi_panel, "Loading JSON...", nullptr);
+    ui_download_update("Loading JSON...", 0, 0);
     snprintf(url, sizeof(url), "https://projects.scratch.mit.edu/%s%s%s",
              project_id, token.empty() ? "" : "?token=", token.c_str());
 
@@ -765,7 +765,7 @@ static bool qr_download_project(const char *project_id)
     int downloaded = 0;
 
     for (auto &name : asset_names) {
-        dsi_modal_progress(dsi_panel, "Assets", downloaded, total_assets);
+        ui_download_update("Assets", downloaded, total_assets);
 
         snprintf(url, sizeof(url),
                  "https://assets.scratch.mit.edu/internalapi/asset/%s/get/", name.c_str());
@@ -918,24 +918,20 @@ extern "C" void app_main(void)
     sd_init();
 
 #if USE_DSI_DISPLAY
+    // Initialize LVGL menu system
+    ui_init(dsi_panel);
+
     // Boot-time WiFi connection (try saved credentials)
     {
         wifi_init();
         char saved_ssid[64] = {}, saved_pass[128] = {};
         if (sd_load_wifi(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass))) {
-            dsi_modal_show(dsi_panel, "Connecting WiFi...", saved_ssid);
-            if (wifi_connect(saved_ssid, saved_pass, 10000)) {
-                dsi_modal_show(dsi_panel, "WiFi OK!", saved_ssid);
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            } else {
-                dsi_modal_show(dsi_panel, "WiFi Failed", "Continue without WiFi");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-            }
+            ui_show_wifi_connecting(saved_ssid);
+            bool ok = wifi_connect(saved_ssid, saved_pass, 10000);
+            ui_show_wifi_result(ok, saved_ssid);
+            vTaskDelay(pdMS_TO_TICKS(ok ? 1000 : 2000));
         }
     }
-
-    // Initialize LVGL menu system
-    ui_init(dsi_panel);
 
     // Main loop: menu → game → menu → ...
     while (true) {
@@ -943,10 +939,10 @@ extern "C" void app_main(void)
 
         if (action == MenuAction::PLAY_FROM_SD) {
             const char *pid = ui_get_selected_project_id();
-            dsi_modal_show(dsi_panel, "Loading...", pid);
+            ui_show_status("Loading...", pid);
 
             if (!load_game_from_sd(pid)) {
-                dsi_modal_show(dsi_panel, "Load Failed", nullptr);
+                ui_show_status("Load Failed", nullptr);
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 ui_resume();
                 continue;
@@ -958,39 +954,48 @@ extern "C" void app_main(void)
             if (!wifi_is_connected()) {
                 char ssid[64] = {}, pass[128] = {};
                 if (sd_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass))) {
-                    dsi_modal_show(dsi_panel, "Connecting WiFi...", ssid);
+                    ui_show_wifi_connecting(ssid);
                     if (!wifi_connect(ssid, pass, 10000)) {
-                        dsi_modal_show(dsi_panel, "WiFi Failed", nullptr);
+                        ui_show_wifi_result(false, ssid);
                         vTaskDelay(pdMS_TO_TICKS(2000));
                         ui_resume();
                         continue;
                     }
+                    ui_show_wifi_result(true, ssid);
+                    vTaskDelay(pdMS_TO_TICKS(500));
                 }
             }
 
-            dsi_modal_show(dsi_panel, "Downloading...", pid);
+            ESP_LOGI(TAG, "DL: show_download_start");
+            ui_show_download_start(pid);
+            ESP_LOGI(TAG, "DL: calling qr_download_project");
 
             if (!qr_download_project(pid)) {
-                dsi_modal_show(dsi_panel, "Download Failed", nullptr);
+                ui_show_download_result(false);
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 wifi_disconnect();
                 ui_resume();
                 continue;
             }
 
-            // Disconnect WiFi before game (SDIO conflicts)
+            ESP_LOGI(TAG, "DL: download complete, showing result");
+            ui_show_download_result(true);
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            ESP_LOGI(TAG, "DL: wifi_disconnect");
             wifi_disconnect();
 
-            // Save to SD for future use
+            ESP_LOGI(TAG, "DL: save_to_sd");
             save_current_project_to_sd(pid);
+            ESP_LOGI(TAG, "DL: save_to_sd done");
         } else {
             continue;
         }
 
         // Suspend LVGL and run the game
-        ui_suspend();
-        dsi_modal_show(dsi_panel, "Starting!", nullptr);
+        ui_show_status("Starting!", nullptr);
         vTaskDelay(pdMS_TO_TICKS(500));
+        ui_suspend();
 
         if (load_and_run()) {
             // Game loop: check for Start/Select overlays
@@ -1002,7 +1007,7 @@ extern "C" void app_main(void)
 
         // Game ended — clean up and return to menu
         free_assets();
-        ui_resume();
+        // ui_resume() happens at top of next ui_menu_run() iteration
     }
 
 #else

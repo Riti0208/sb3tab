@@ -42,3 +42,21 @@ void ui_resume();
 // Returns true if user confirmed exit.
 bool ui_show_exit_confirm();
 void ui_show_button_map();
+
+// LVGL status screens (called from app_main with LVGL running)
+// Show WiFi connecting screen (call before wifi_connect)
+void ui_show_wifi_connecting(const char *ssid);
+// Update WiFi status result
+void ui_show_wifi_result(bool ok, const char *ssid);
+
+// Show download progress screen. Call ui_download_update() to update.
+void ui_show_download_start(const char *project_id);
+void ui_download_update(const char *status, int current, int total);
+void ui_show_download_result(bool ok);
+
+// Show a simple status screen (e.g. "Loading...", "Starting!")
+void ui_show_status(const char *title, const char *detail);
+
+// Show confirmation dialog. Blocks until A or B pressed.
+// Returns true if confirmed (A).
+bool ui_show_confirm(const char *title, const char *detail);
