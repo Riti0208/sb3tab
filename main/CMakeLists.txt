@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
          "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp" "sd_storage.cpp" "gamepad.cpp"
-         "es8388_audio.cpp" "ui_menu.cpp"
+         "es8388_audio.cpp" "ui_menu.cpp" "i18n.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -24,11 +24,19 @@ idf_component_register(
         fatfs
         sdmmc
         usb
+    EMBED_FILES
+        "assets/logo.png"
+        "assets/icon_play.png"
+        "assets/icon_new.png"
+        "assets/icon_settings.png"
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=all
-    -include ${CMAKE_SOURCE_DIR}/components/scratch_core/deps/miniz/miniz.h
+    # Restrict -include miniz.h to C/C++ so it doesn't apply to the auto-
+    # generated .S files for EMBED_FILES (which would otherwise try to
+    # preprocess miniz declarations as assembly).
+    "$<$<COMPILE_LANGUAGE:C,CXX>:-include${CMAKE_SOURCE_DIR}/components/scratch_core/deps/miniz/miniz.h>"
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINIZ_HEADER_INCLUDED=1)
 

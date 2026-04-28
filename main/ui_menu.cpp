@@ -33,6 +33,36 @@
 extern "C" const uint8_t noto_sans_ttf_start[] asm("_binary_NotoSansJP_Medium_subset_ttf_start");
 extern "C" const uint8_t noto_sans_ttf_end[]   asm("_binary_NotoSansJP_Medium_subset_ttf_end");
 
+// Embedded UI assets (linked via EMBED_FILES in main/CMakeLists.txt)
+extern "C" const uint8_t logo_png_start[]          asm("_binary_logo_png_start");
+extern "C" const uint8_t logo_png_end[]            asm("_binary_logo_png_end");
+extern "C" const uint8_t icon_play_png_start[]     asm("_binary_icon_play_png_start");
+extern "C" const uint8_t icon_play_png_end[]       asm("_binary_icon_play_png_end");
+extern "C" const uint8_t icon_new_png_start[]      asm("_binary_icon_new_png_start");
+extern "C" const uint8_t icon_new_png_end[]        asm("_binary_icon_new_png_end");
+extern "C" const uint8_t icon_settings_png_start[] asm("_binary_icon_settings_png_start");
+extern "C" const uint8_t icon_settings_png_end[]   asm("_binary_icon_settings_png_end");
+
+static lv_image_dsc_t s_logo_dsc;
+static lv_image_dsc_t s_icon_play_dsc;
+static lv_image_dsc_t s_icon_new_dsc;
+static lv_image_dsc_t s_icon_settings_dsc;
+
+static void init_image_dscs()
+{
+    auto setup = [](lv_image_dsc_t &d, const uint8_t *start, const uint8_t *end, int w, int h) {
+        d.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
+        d.header.w = w;
+        d.header.h = h;
+        d.data = start;
+        d.data_size = (uint32_t)(end - start);
+    };
+    setup(s_logo_dsc,          logo_png_start,          logo_png_end,          512, 128);
+    setup(s_icon_play_dsc,     icon_play_png_start,     icon_play_png_end,     320, 320);
+    setup(s_icon_new_dsc,      icon_new_png_start,      icon_new_png_end,      320, 320);
+    setup(s_icon_settings_dsc, icon_settings_png_start, icon_settings_png_end, 320, 320);
+}
+
 // Pick the closest pre-baked Montserrat font for a desired pixel size.
 // Used as a fallback for the JP TTF (NotoSansJP subset doesn't include LV_SYMBOL_*
 // FontAwesome glyphs) and as the primary font in EN mode.
@@ -65,14 +95,44 @@ static lv_font_t *get_jp_font(int px) {
     return f;
 }
 
+// Wrap a Montserrat font with a NotoSansJP fallback, so EN-mode labels can still
+// render Japanese characters (e.g. game titles, WiFi SSIDs). lv_font_montserrat_*
+// lives in flash and is const, so we copy the struct into a writable cache and
+// patch only the fallback pointer.
+struct MontFbEntry { int px; const lv_font_t *base; lv_font_t copy; bool inited; };
+static MontFbEntry s_mont_fb[] = {
+    {14, &lv_font_montserrat_14, {}, false},
+    {16, &lv_font_montserrat_16, {}, false},
+    {18, &lv_font_montserrat_18, {}, false},
+    {20, &lv_font_montserrat_20, {}, false},
+    {24, &lv_font_montserrat_24, {}, false},
+    {36, &lv_font_montserrat_36, {}, false},
+};
+
+static const lv_font_t *montserrat_with_jp_fb(int px) {
+    MontFbEntry *picked = &s_mont_fb[0];
+    for (auto &m : s_mont_fb) {
+        picked = &m;
+        if (px <= m.px) break;
+    }
+    if (!picked->inited) {
+        picked->copy = *picked->base;
+        picked->copy.fallback = get_jp_font(picked->px);
+        picked->inited = true;
+    }
+    return &picked->copy;
+}
+
 // Pick the menu font for a desired pixel size based on the current language.
-// EN: pre-baked Montserrat (fast, polished). JP: NotoSansJP TTF + Montserrat fallback.
+// EN: Montserrat → NotoSansJP fallback (so JP user-content like game titles renders).
+// JP: NotoSansJP → Montserrat fallback (so LV_SYMBOL FontAwesome glyphs render).
 static const lv_font_t *menu_font(int px) {
     if (lang_get() == Lang::JP) {
         lv_font_t *f = get_jp_font(px);
         if (f) return f;
+        return montserrat_for(px);
     }
-    return montserrat_for(px);
+    return montserrat_with_jp_fb(px);
 }
 
 static const char *TAG = "ui_menu";
@@ -209,12 +269,21 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
     // D-pad UP/DOWN → navigate. LEFT/RIGHT → adjust in edit mode (sliders),
     // otherwise also navigate (so horizontal Yes/No is reachable with the d-pad).
+    // Special case: when a dropdown is open, UP/DOWN must scroll its options
+    // (LV_KEY_UP/DOWN) instead of jumping to the previous/next group widget.
     bool editing = s_group && lv_group_get_editing(s_group);
+    bool dropdown_open = false;
+    if (s_group) {
+        lv_obj_t *focused = lv_group_get_focused(s_group);
+        if (focused && lv_obj_check_type(focused, &lv_dropdown_class)) {
+            dropdown_open = lv_dropdown_is_open(focused);
+        }
+    }
     if (b & XBOX_DPAD_UP) {
-        data->key = LV_KEY_PREV;
+        data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & XBOX_DPAD_DOWN) {
-        data->key = LV_KEY_NEXT;
+        data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & XBOX_DPAD_LEFT) {
         data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
@@ -234,9 +303,11 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     if (data->key == 0) {
         const int16_t DZ = 16000;
         if (gs.ly > DZ) {
-            data->key = LV_KEY_PREV; data->state = LV_INDEV_STATE_PRESSED;
+            data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
+            data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.ly < -DZ) {
-            data->key = LV_KEY_NEXT; data->state = LV_INDEV_STATE_PRESSED;
+            data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
+            data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.lx < -DZ) {
             data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
             data->state = LV_INDEV_STATE_PRESSED;
@@ -349,6 +420,28 @@ static void init_styles()
     lv_style_set_outline_opa(&s_style_widget_focus, LV_OPA_COVER);
     lv_style_set_border_color(&s_style_widget_focus, lv_color_hex(SCRATCH_ORANGE));
     lv_style_set_border_width(&s_style_widget_focus, 3);
+
+    // Synchronized focus transition: bg / border / shadow all animate together.
+    // Without this, LVGL's default theme animates bg_color (~80ms) but applies
+    // border/shadow instantly, causing the frame to "lead" the fill on focus.
+    static const lv_style_prop_t focus_trans_props[] = {
+        LV_STYLE_BG_COLOR,
+        LV_STYLE_BG_OPA,
+        LV_STYLE_BORDER_COLOR,
+        LV_STYLE_BORDER_WIDTH,
+        LV_STYLE_BORDER_OPA,
+        LV_STYLE_SHADOW_COLOR,
+        LV_STYLE_SHADOW_WIDTH,
+        LV_STYLE_SHADOW_SPREAD,
+        LV_STYLE_SHADOW_OPA,
+        LV_STYLE_TEXT_COLOR,
+        LV_STYLE_PROP_INV,
+    };
+    static lv_style_transition_dsc_t focus_trans;
+    lv_style_transition_dsc_init(&focus_trans, focus_trans_props,
+                                 lv_anim_path_linear, 80, 0, NULL);
+    lv_style_set_transition(&s_style_btn,       &focus_trans);
+    lv_style_set_transition(&s_style_btn_focus, &focus_trans);
 }
 
 // Helper: create a styled button with label
@@ -366,6 +459,43 @@ static lv_obj_t *create_menu_btn(lv_obj_t *parent, const char *text, lv_event_cb
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
     lv_obj_center(label);
+
+    lv_group_add_obj(s_group, btn);
+    return btn;
+}
+
+// Helper: create a tall tile button with icon on top and label below.
+// Used for the main menu's 3 horizontal tiles.
+// Icon dsc is 320x320 source; LVGL scales it down via image zoom.
+static lv_obj_t *create_tile_btn(lv_obj_t *parent, const lv_image_dsc_t *icon,
+                                 const char *text, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_add_style(btn, &s_style_btn, 0);
+    lv_obj_add_style(btn, &s_style_btn_focus, LV_STATE_FOCUSED);
+    lv_obj_add_style(btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
+    lv_obj_set_size(btn, 240, 280);
+    lv_obj_set_style_pad_all(btn, 16, 0);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(btn, 8, 0);
+    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    // Icon: 320x320 source scaled to ~160px (zoom = 256 * 160/320 = 128)
+    lv_obj_t *img = lv_image_create(btn);
+    lv_image_set_src(img, icon);
+    lv_image_set_scale(img, 128);  // 50% scale → 160x160 displayed
+    lv_obj_set_size(img, 160, 160);
+    lv_obj_set_style_pad_all(img, 0, 0);
+    lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+
+    // Label below the icon (wraps to next line if too long)
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, menu_font(22), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(label, 208);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 
     lv_group_add_obj(s_group, btn);
     return btn;
@@ -415,35 +545,30 @@ static void build_main_menu()
     s_scr_main = lv_obj_create(nullptr);
     lv_obj_add_style(s_scr_main, &s_style_bg, 0);
 
-    // Title (brand name — kept as-is)
-    lv_obj_t *title = lv_label_create(s_scr_main);
-    lv_label_set_text(title, "ScratchESP");
-    lv_obj_add_style(title, &s_style_title, 0);
-    lv_obj_set_style_text_font(title, menu_font(36), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
+    // Logo image (replaces "ScratchESP" text — 512x128 RGBA PNG)
+    lv_obj_t *logo = lv_image_create(s_scr_main);
+    lv_image_set_src(logo, &s_logo_dsc);
+    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_clear_flag(logo, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *subtitle = lv_label_create(s_scr_main);
     lv_label_set_text(subtitle, tr(STR_SUBTITLE));
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0xD9E3F7), 0);
     lv_obj_set_style_text_font(subtitle, menu_font(16), 0);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 90);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 180);
 
-    // Menu buttons container
+    // 3-tile container (horizontal flex, big icon-on-top tiles)
     lv_obj_t *cont = lv_obj_create(s_scr_main);
     lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, lv_pct(100), 400);
-    lv_obj_align(cont, LV_ALIGN_CENTER, 0, 40);
-    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_size(cont, lv_pct(100), 320);
+    lv_obj_align(cont, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(cont, 16, 0);
+    lv_obj_set_style_pad_column(cont, 32, 0);
 
-    char buf[96];
-    snprintf(buf, sizeof(buf), LV_SYMBOL_LIST "  %s", tr(STR_MAIN_GAMES));
-    create_menu_btn(cont, buf, on_games_click);
-    snprintf(buf, sizeof(buf), LV_SYMBOL_DOWNLOAD "  %s", tr(STR_MAIN_NEW_GAME));
-    create_menu_btn(cont, buf, on_new_game_click);
-    snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS "  %s", tr(STR_MAIN_SETTINGS));
-    create_menu_btn(cont, buf, on_settings_click);
+    create_tile_btn(cont, &s_icon_play_dsc,     tr(STR_MAIN_GAMES),    on_games_click);
+    create_tile_btn(cont, &s_icon_new_dsc,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
+    create_tile_btn(cont, &s_icon_settings_dsc, tr(STR_MAIN_SETTINGS), on_settings_click);
 
     // Footer: gamepad status
     lv_obj_t *footer = lv_label_create(s_scr_main);
@@ -597,11 +722,42 @@ static void on_settings_back(lv_event_t *e) {
     s_state = MenuState::MAIN_MENU;
 }
 
-static void on_language_toggle(lv_event_t *e) {
-    lang_set(lang_get() == Lang::JP ? Lang::EN : Lang::JP);
-    // Rebuild Settings so all labels redraw in the new language.
+// Language dropdown — option index → Lang. Order must match the options string below.
+static const Lang LANG_OPTIONS[] = { Lang::EN, Lang::JP, Lang::KR, Lang::ZH_CN };
+static const char *LANG_DD_TEXT = "English\n日本語\n한국어\n简体中文";
+
+static int lang_to_index(Lang l) {
+    for (int i = 0; i < (int)(sizeof(LANG_OPTIONS) / sizeof(LANG_OPTIONS[0])); i++) {
+        if (LANG_OPTIONS[i] == l) return i;
+    }
+    return 0;
+}
+
+static void on_language_change(lv_event_t *e) {
+    lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
+    int idx = (int)lv_dropdown_get_selected(dd);
+    if (idx < 0 || idx >= (int)(sizeof(LANG_OPTIONS) / sizeof(LANG_OPTIONS[0]))) return;
+    Lang new_lang = LANG_OPTIONS[idx];
+    if (new_lang == lang_get()) return;
+    lang_set(new_lang);
     build_settings();
     show_screen(s_scr_settings);
+}
+
+// Apply the JP-capable font to the dropdown's popup list when it opens, so
+// "日本語" renders correctly (the list is created lazily by LVGL).
+static void on_language_dropdown_open(lv_event_t *e) {
+    lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    if (!list) return;
+    lv_obj_set_style_text_font(list, menu_font(18), 0);
+    lv_obj_set_style_bg_color(list, lv_color_hex(SCRATCH_CARD), 0);
+    lv_obj_set_style_text_color(list, lv_color_hex(SCRATCH_TEXT), 0);
+    lv_obj_set_style_radius(list, 12, 0);
+    lv_obj_set_style_pad_all(list, 8, 0);
+    // Highlight selected/focused item with Scratch orange
+    lv_obj_set_style_bg_color(list, lv_color_hex(SCRATCH_ORANGE), LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(list, lv_color_hex(SCRATCH_WHITE), LV_PART_SELECTED | LV_STATE_CHECKED);
 }
 
 static void build_settings()
@@ -681,7 +837,7 @@ static void build_settings()
 
         s_brightness_label = lv_label_create(slider_row);
         lv_label_set_text_fmt(s_brightness_label, "%d%%", s_brightness);
-        lv_obj_set_style_text_font(s_brightness_label, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_font(s_brightness_label, menu_font(18), 0);
         lv_obj_set_width(s_brightness_label, 60);
     }
 
@@ -695,8 +851,8 @@ static void build_settings()
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         lv_obj_t *lbl = lv_label_create(row);
-        lv_label_set_text(lbl, "Mute Audio");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_label_set_text(lbl, tr(STR_MUTE_AUDIO));
+        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
 
         lv_obj_t *sw = lv_switch_create(row);
         if (s_muted) lv_obj_add_state(sw, LV_STATE_CHECKED);
@@ -707,11 +863,39 @@ static void build_settings()
         lv_group_add_obj(s_group, sw);
     }
 
+    // -- Language (dropdown) --
+    {
+        lv_obj_t *row = lv_obj_create(cont);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, 50);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text(lbl, tr(STR_LANGUAGE));
+        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
+
+        lv_obj_t *dd = lv_dropdown_create(row);
+        lv_dropdown_set_options_static(dd, LANG_DD_TEXT);
+        lv_dropdown_set_selected(dd, lang_to_index(lang_get()));
+        lv_obj_set_size(dd, 220, 44);
+        lv_obj_set_style_text_font(dd, menu_font(18), 0);
+        lv_obj_add_style(dd, &s_style_btn, 0);
+        lv_obj_add_style(dd, &s_style_btn_focus, LV_STATE_FOCUSED);
+        lv_obj_add_style(dd, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
+        lv_obj_set_style_pad_left(dd, 16, 0);
+        lv_obj_set_style_pad_right(dd, 12, 0);
+        lv_obj_add_event_cb(dd, on_language_change, LV_EVENT_VALUE_CHANGED, nullptr);
+        lv_obj_add_event_cb(dd, on_language_dropdown_open, LV_EVENT_READY, nullptr);
+        lv_group_add_obj(s_group, dd);
+    }
+
     // -- Network --
     {
         lv_obj_t *lbl = lv_label_create(cont);
-        lv_label_set_text(lbl, "Network");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_label_set_text(lbl, tr(STR_NETWORK));
+        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
 
         // Show current WiFi status
         char saved_ssid[64] = {}, saved_pass[128] = {};
@@ -719,13 +903,16 @@ static void build_settings()
 
         lv_obj_t *wifi_info = lv_label_create(cont);
         if (has_wifi) {
-            lv_label_set_text_fmt(wifi_info, "Saved: %s", saved_ssid);
+            lv_label_set_text_fmt(wifi_info, tr(STR_WIFI_SAVED_FMT), saved_ssid);
         } else {
-            lv_label_set_text(wifi_info, "No WiFi configured");
+            lv_label_set_text(wifi_info, tr(STR_WIFI_NONE));
         }
         lv_obj_set_style_text_color(wifi_info, lv_color_hex(0xD9E3F7), 0);
+        lv_obj_set_style_text_font(wifi_info, menu_font(16), 0);
 
-        create_menu_btn(cont, LV_SYMBOL_WIFI "  Scan WiFi QR", on_network_qr);
+        char wifi_buf[96];
+        snprintf(wifi_buf, sizeof(wifi_buf), LV_SYMBOL_WIFI "  %s", tr(STR_WIFI_SCAN_QR));
+        create_menu_btn(cont, wifi_buf, on_network_qr);
     }
 
     // -- Version --
@@ -733,16 +920,17 @@ static void build_settings()
         lv_obj_t *ver = lv_label_create(cont);
         lv_label_set_text(ver, "ScratchESP v0.1.0 | ESP32-P4");
         lv_obj_set_style_text_color(ver, lv_color_hex(0xB3CDFF), 0);
-        lv_obj_set_style_text_font(ver, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(ver, menu_font(14), 0);
     }
 
     // Footer hint
     lv_obj_t *hint = lv_label_create(s_scr_settings);
-    lv_label_set_text(hint, LV_SYMBOL_UP LV_SYMBOL_DOWN ": Move  "
-                            LV_SYMBOL_LEFT LV_SYMBOL_RIGHT ": Adjust  "
-                            "A: Select  B: Back");
+    char hint_buf[160];
+    snprintf(hint_buf, sizeof(hint_buf), LV_SYMBOL_UP LV_SYMBOL_DOWN
+             "  " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT "  %s", tr(STR_SETTINGS_HINT));
+    lv_label_set_text(hint, hint_buf);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(hint, menu_font(14), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
 
@@ -780,7 +968,7 @@ static void build_status_screen(const char *title, const char *detail, bool show
     // Title
     s_status_title = lv_label_create(box);
     lv_label_set_text(s_status_title, title ? title : "");
-    lv_obj_set_style_text_font(s_status_title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(s_status_title, menu_font(24), 0);
     lv_obj_set_style_text_color(s_status_title, lv_color_hex(SCRATCH_TEXT), 0);
     lv_obj_set_style_text_align(s_status_title, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -811,13 +999,13 @@ static void build_status_screen(const char *title, const char *detail, bool show
     // Percentage / status text
     s_status_pct = lv_label_create(box);
     lv_label_set_text(s_status_pct, "");
-    lv_obj_set_style_text_font(s_status_pct, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_status_pct, menu_font(14), 0);
     lv_obj_set_style_text_color(s_status_pct, lv_color_hex(SCRATCH_TEXT), 0);
 
     // Detail text
     s_status_detail = lv_label_create(box);
     lv_label_set_text(s_status_detail, detail ? detail : "");
-    lv_obj_set_style_text_font(s_status_detail, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_status_detail, menu_font(16), 0);
     lv_obj_set_style_text_color(s_status_detail, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_align(s_status_detail, LV_TEXT_ALIGN_CENTER, 0);
 }
@@ -925,13 +1113,13 @@ static void build_confirm_screen(const char *title, const char *detail)
 
     lv_obj_t *ttl = lv_label_create(box);
     lv_label_set_text(ttl, title);
-    lv_obj_set_style_text_font(ttl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(ttl, menu_font(24), 0);
     lv_obj_set_style_text_color(ttl, lv_color_hex(SCRATCH_TEXT), 0);
 
     if (detail) {
         lv_obj_t *dtl = lv_label_create(box);
         lv_label_set_text(dtl, detail);
-        lv_obj_set_style_text_font(dtl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(dtl, menu_font(16), 0);
         lv_obj_set_style_text_color(dtl, lv_color_hex(0x888888), 0);
     }
 
@@ -949,10 +1137,13 @@ static void build_confirm_screen(const char *title, const char *detail)
     lv_obj_add_style(btn_yes, &s_style_btn, 0);
     lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-    lv_obj_set_size(btn_yes, 160, 48);
+    lv_obj_set_size(btn_yes, 180, 48);
+    lv_obj_set_style_text_font(btn_yes, menu_font(18), 0);
     lv_obj_add_event_cb(btn_yes, on_confirm_yes, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *lbl_yes = lv_label_create(btn_yes);
-    lv_label_set_text(lbl_yes, LV_SYMBOL_OK "  Yes");
+    char yes_buf[64];
+    snprintf(yes_buf, sizeof(yes_buf), LV_SYMBOL_OK "  %s", tr(STR_YES));
+    lv_label_set_text(lbl_yes, yes_buf);
     lv_obj_center(lbl_yes);
     lv_group_add_obj(s_group, btn_yes);
 
@@ -961,10 +1152,13 @@ static void build_confirm_screen(const char *title, const char *detail)
     lv_obj_add_style(btn_no, &s_style_btn, 0);
     lv_obj_add_style(btn_no, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(btn_no, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-    lv_obj_set_size(btn_no, 160, 48);
+    lv_obj_set_size(btn_no, 180, 48);
+    lv_obj_set_style_text_font(btn_no, menu_font(18), 0);
     lv_obj_add_event_cb(btn_no, on_confirm_no, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *lbl_no = lv_label_create(btn_no);
-    lv_label_set_text(lbl_no, LV_SYMBOL_CLOSE "  No");
+    char no_buf[64];
+    snprintf(no_buf, sizeof(no_buf), LV_SYMBOL_CLOSE "  %s", tr(STR_NO));
+    lv_label_set_text(lbl_no, no_buf);
     lv_obj_center(lbl_no);
     lv_group_add_obj(s_group, btn_no);
 }
@@ -1024,6 +1218,9 @@ void ui_init(esp_lcd_panel_handle_t panel)
 
     // Init styles
     init_styles();
+
+    // Init embedded image descriptors (logo + tile icons)
+    init_image_dscs();
 
     // Input device (gamepad as keypad)
     s_indev = lv_indev_create();
@@ -1119,7 +1316,7 @@ MenuAction ui_menu_run()
         if (s_state == MenuState::QR_PROJECT) {
             // Check WiFi (post-game reconnect runs synchronously in main, so this is rare)
             if (!wifi_is_connected()) {
-                ui_show_status("No WiFi", "Set up WiFi in Settings first");
+                ui_show_status(tr(STR_NO_WIFI), tr(STR_NO_WIFI_DETAIL));
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 s_state = MenuState::MAIN_MENU;
                 xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
@@ -1212,8 +1409,8 @@ MenuAction ui_menu_run()
                 xSemaphoreGive(s_lvgl_mutex);
                 if (pid && pid[0]) {
                     char detail[128];
-                    snprintf(detail, sizeof(detail), "Delete \"%s\"?", pid);
-                    if (ui_show_confirm("Confirm", detail)) {
+                    snprintf(detail, sizeof(detail), tr(STR_DELETE_FMT), pid);
+                    if (ui_show_confirm(tr(STR_CONFIRM), detail)) {
                         sd_delete_game(pid);
                     }
                     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
@@ -1265,7 +1462,7 @@ bool ui_show_exit_confirm()
     // "STARTING..." status screen) gets pushed for a frame and flashes.
     s_confirm_result = -1;
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-    build_confirm_screen("Return to Menu?", nullptr);
+    build_confirm_screen(tr(STR_RETURN_TO_MENU), nullptr);
     lv_screen_load_anim(s_scr_status, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
     xSemaphoreGive(s_lvgl_mutex);
 
@@ -1288,7 +1485,7 @@ bool ui_show_exit_confirm()
 
 void ui_show_button_map()
 {
-    dsi_modal_show(s_panel, "Button Map", "D-Pad:Arrows A:Space");
+    dsi_modal_show(s_panel, tr(STR_BUTTON_MAP), tr(STR_BUTTON_MAP_DETAIL));
     vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
@@ -1299,7 +1496,7 @@ void ui_show_button_map()
 void ui_show_wifi_connecting(const char *ssid)
 {
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-    build_status_screen("Connecting to WiFi...", ssid, true);
+    build_status_screen(tr(STR_WIFI_CONNECTING), ssid, true);
     lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
     show_screen(s_scr_status);
     xSemaphoreGive(s_lvgl_mutex);
@@ -1309,7 +1506,11 @@ void ui_show_wifi_result(bool ok, const char *ssid)
 {
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
     if (s_status_title) {
-        lv_label_set_text(s_status_title, ok ? LV_SYMBOL_WIFI "  Connected!" : LV_SYMBOL_CLOSE "  WiFi Failed");
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s  %s",
+                 ok ? LV_SYMBOL_WIFI : LV_SYMBOL_CLOSE,
+                 ok ? tr(STR_WIFI_CONNECTED) : tr(STR_WIFI_FAILED));
+        lv_label_set_text(s_status_title, buf);
         lv_obj_set_style_text_color(s_status_title,
             lv_color_hex(ok ? 0x0FBD8C : 0xFF6680), 0);  // Scratch green / red
     }
@@ -1325,7 +1526,9 @@ void ui_show_wifi_result(bool ok, const char *ssid)
 void ui_show_download_start(const char *project_id)
 {
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-    build_status_screen(LV_SYMBOL_DOWNLOAD "  Downloading...", project_id, false);
+    char buf[96];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_DOWNLOAD "  %s", tr(STR_DOWNLOADING));
+    build_status_screen(buf, project_id, false);
     // Show progress bar
     if (s_status_bar) {
         lv_obj_clear_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
@@ -1356,7 +1559,11 @@ void ui_show_download_result(bool ok)
 {
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
     if (s_status_title) {
-        lv_label_set_text(s_status_title, ok ? LV_SYMBOL_OK "  Download Complete!" : LV_SYMBOL_CLOSE "  Download Failed");
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s  %s",
+                 ok ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                 ok ? tr(STR_DL_COMPLETE) : tr(STR_DL_FAILED));
+        lv_label_set_text(s_status_title, buf);
         lv_obj_set_style_text_color(s_status_title,
             lv_color_hex(ok ? 0x0FBD8C : 0xFF6680), 0);
     }

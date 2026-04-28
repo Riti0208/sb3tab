@@ -4,6 +4,8 @@
 enum class Lang : uint8_t {
     EN = 0,
     JP = 1,
+    KR = 2,
+    ZH_CN = 3,
 };
 
 enum StringId {

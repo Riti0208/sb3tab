@@ -42,6 +42,7 @@
 #include "gamepad.h"
 #include "es8388_audio.h"
 #include "ui_menu.h"
+#include "i18n.h"
 #include <input.hpp>
 
 // Build for DSI (Tab5) or SPI LCD
@@ -728,7 +729,7 @@ static bool load_and_run()
 static bool qr_download_project(const char *project_id)
 {
     usb_ll_write("DL_START\n");
-    ui_download_update("Fetching info...", 0, 0);
+    ui_download_update(tr(STR_FETCHING_INFO), 0, 0);
 
     // Step 1: Get project token from API
     char url[256];
@@ -762,7 +763,7 @@ static bool qr_download_project(const char *project_id)
     }
 
     // Step 2: Download project.json
-    ui_download_update("Loading JSON...", 0, 0);
+    ui_download_update(tr(STR_LOADING_JSON), 0, 0);
     snprintf(url, sizeof(url), "https://projects.scratch.mit.edu/%s%s%s",
              project_id, token.empty() ? "" : "?token=", token.c_str());
 
@@ -793,6 +794,16 @@ static bool qr_download_project(const char *project_id)
     }
     heap_caps_free(json_data);
     usb_ll_write("JSON_OK\n");
+
+    {
+        char hmsg[160];
+        snprintf(hmsg, sizeof(hmsg),
+            "HEAP after JSON: internal=%u (largest=%u) psram=%u\n",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        usb_ll_write(hmsg);
+    }
 
     // Step 3: Extract asset list and download each
     std::vector<std::string> asset_names;
@@ -825,7 +836,7 @@ static bool qr_download_project(const char *project_id)
     int downloaded = 0;
 
     for (auto &name : asset_names) {
-        ui_download_update("Assets", downloaded, total_assets);
+        ui_download_update(tr(STR_ASSETS), downloaded, total_assets);
 
         snprintf(url, sizeof(url),
                  "https://assets.scratch.mit.edu/internalapi/asset/%s/get/", name.c_str());
@@ -991,6 +1002,9 @@ extern "C" void app_main(void)
     gamepad_init();
     sd_init();
 
+    // Load saved UI language (depends on SD being mounted; defaults to EN)
+    lang_init();
+
 #if USE_DSI_DISPLAY
     // Initialize LVGL menu system
     ui_init(dsi_panel);
@@ -1013,10 +1027,10 @@ extern "C" void app_main(void)
 
         if (action == MenuAction::PLAY_FROM_SD) {
             const char *pid = ui_get_selected_project_id();
-            ui_show_status("Loading...", pid);
+            ui_show_status(tr(STR_LOADING), pid);
 
             if (!load_game_from_sd(pid)) {
-                ui_show_status("Load Failed", nullptr);
+                ui_show_status(tr(STR_LOAD_FAILED), nullptr);
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 ui_resume();
                 continue;
@@ -1067,7 +1081,7 @@ extern "C" void app_main(void)
         }
 
         // Suspend LVGL and run the game
-        ui_show_status("Starting!", nullptr);
+        ui_show_status(tr(STR_STARTING), nullptr);
         vTaskDelay(pdMS_TO_TICKS(500));
         ui_suspend();
 

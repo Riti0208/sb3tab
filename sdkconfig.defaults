@@ -78,3 +78,11 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # LVGL Tiny TTF (for Japanese game titles in menu)
 CONFIG_LV_USE_TINY_TTF=y
 CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT=256
+
+# LVGL PNG decoder (for embedded logo + tile icons)
+CONFIG_LV_USE_LODEPNG=y
+
+# LVGL image cache (4MB) — caches decoded PNG so they're not re-decoded every
+# frame during focus transitions. 0 = disabled (causes severe lag with PNG icons).
+CONFIG_LV_CACHE_DEF_SIZE=4194304
+CONFIG_LV_IMAGE_HEADER_CACHE_DEF_CNT=16

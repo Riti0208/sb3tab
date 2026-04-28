@@ -104,12 +104,127 @@ static const char *JP[STR_COUNT] = {
     [STR_ASSETS]            = "アセット",
 };
 
+static const char *KR[STR_COUNT] = {
+    [STR_SUBTITLE]          = "ESP32-P4의 스크래치",
+    [STR_FOOTER_HINT]       = "A: 선택  B: 뒤로",
+    [STR_GAMEPAD_OK]        = " 게임패드",
+    [STR_GAMEPAD_NONE]      = " 미연결",
+
+    [STR_MAIN_GAMES]        = "게임 목록",
+    [STR_MAIN_NEW_GAME]     = "새 게임 (QR)",
+    [STR_MAIN_SETTINGS]     = "설정",
+
+    [STR_GAMES_TITLE]       = "저장된 게임",
+    [STR_BACK]              = "뒤로",
+    [STR_GAMES_EMPTY]       = "저장된 게임이 없습니다.\n새 게임에서 다운로드하세요.",
+    [STR_GAMES_HINT]        = "A: 시작  X: 삭제  B: 뒤로",
+
+    [STR_SETTINGS_TITLE]    = "설정",
+    [STR_BRIGHTNESS]        = "밝기",
+    [STR_MUTE_AUDIO]        = "음소거",
+    [STR_LANGUAGE]          = "언어",
+    [STR_NETWORK]           = "네트워크",
+    [STR_WIFI_SAVED_FMT]    = "저장됨: %s",
+    [STR_WIFI_NONE]         = "WiFi 미설정",
+    [STR_WIFI_SCAN_QR]      = "WiFi QR 스캔",
+    [STR_SETTINGS_HINT]     = "이동  조정  A: 선택  B: 뒤로",
+
+    [STR_YES]               = "예",
+    [STR_NO]                = "아니오",
+    [STR_CONFIRM]           = "확인",
+    [STR_DELETE_FMT]        = "「%s」를 삭제하시겠습니까?",
+    [STR_RETURN_TO_MENU]    = "메뉴로 돌아가시겠습니까?",
+
+    [STR_WIFI_CONNECTING]   = "WiFi 연결 중...",
+    [STR_WIFI_CONNECTED]    = "연결되었습니다!",
+    [STR_WIFI_FAILED]       = "WiFi 연결 실패",
+    [STR_DOWNLOADING]       = "다운로드 중...",
+    [STR_DL_COMPLETE]       = "다운로드 완료!",
+    [STR_DL_FAILED]         = "다운로드 실패",
+    [STR_LOADING]           = "로딩 중...",
+    [STR_LOAD_FAILED]       = "로드 실패",
+    [STR_STARTING]          = "시작!",
+    [STR_NO_WIFI]           = "WiFi 없음",
+    [STR_NO_WIFI_DETAIL]    = "설정에서 WiFi를 먼저 설정하세요",
+    [STR_BUTTON_MAP]        = "버튼 배치",
+    [STR_BUTTON_MAP_DETAIL] = "방향키:화살표 A:스페이스",
+    [STR_FETCHING_INFO]     = "정보 가져오는 중...",
+    [STR_LOADING_JSON]      = "JSON 로딩 중...",
+    [STR_ASSETS]            = "에셋",
+};
+
+static const char *ZH_CN[STR_COUNT] = {
+    [STR_SUBTITLE]          = "ESP32-P4 上的 Scratch",
+    [STR_FOOTER_HINT]       = "A: 选择  B: 返回",
+    [STR_GAMEPAD_OK]        = " 手柄",
+    [STR_GAMEPAD_NONE]      = " 未连接",
+
+    [STR_MAIN_GAMES]        = "游戏列表",
+    [STR_MAIN_NEW_GAME]     = "新游戏 (QR)",
+    [STR_MAIN_SETTINGS]     = "设置",
+
+    [STR_GAMES_TITLE]       = "已保存的游戏",
+    [STR_BACK]              = "返回",
+    [STR_GAMES_EMPTY]       = "没有保存的游戏。\n请从「新游戏」下载。",
+    [STR_GAMES_HINT]        = "A: 开始  X: 删除  B: 返回",
+
+    [STR_SETTINGS_TITLE]    = "设置",
+    [STR_BRIGHTNESS]        = "亮度",
+    [STR_MUTE_AUDIO]        = "静音",
+    [STR_LANGUAGE]          = "语言",
+    [STR_NETWORK]           = "网络",
+    [STR_WIFI_SAVED_FMT]    = "已保存: %s",
+    [STR_WIFI_NONE]         = "未配置 WiFi",
+    [STR_WIFI_SCAN_QR]      = "扫描 WiFi QR",
+    [STR_SETTINGS_HINT]     = "移动  调整  A: 选择  B: 返回",
+
+    [STR_YES]               = "是",
+    [STR_NO]                = "否",
+    [STR_CONFIRM]           = "确认",
+    [STR_DELETE_FMT]        = "删除「%s」？",
+    [STR_RETURN_TO_MENU]    = "返回主菜单？",
+
+    [STR_WIFI_CONNECTING]   = "正在连接 WiFi...",
+    [STR_WIFI_CONNECTED]    = "已连接！",
+    [STR_WIFI_FAILED]       = "WiFi 连接失败",
+    [STR_DOWNLOADING]       = "下载中...",
+    [STR_DL_COMPLETE]       = "下载完成！",
+    [STR_DL_FAILED]         = "下载失败",
+    [STR_LOADING]           = "加载中...",
+    [STR_LOAD_FAILED]       = "加载失败",
+    [STR_STARTING]          = "开始！",
+    [STR_NO_WIFI]           = "无 WiFi",
+    [STR_NO_WIFI_DETAIL]    = "请先在设置中配置 WiFi",
+    [STR_BUTTON_MAP]        = "按键映射",
+    [STR_BUTTON_MAP_DETAIL] = "方向键:方向 A:空格",
+    [STR_FETCHING_INFO]     = "获取信息中...",
+    [STR_LOADING_JSON]      = "加载 JSON 中...",
+    [STR_ASSETS]            = "资源",
+};
+
+static const char *lang_to_code(Lang l) {
+    switch (l) {
+        case Lang::JP:    return "jp";
+        case Lang::KR:    return "ko";
+        case Lang::ZH_CN: return "zh_cn";
+        case Lang::EN:    /* fallthrough */
+        default:          return "en";
+    }
+}
+
+static Lang code_to_lang(const char *code) {
+    if (!code) return Lang::EN;
+    if (strcmp(code, "jp") == 0)    return Lang::JP;
+    if (strcmp(code, "ko") == 0)    return Lang::KR;
+    if (strcmp(code, "zh_cn") == 0) return Lang::ZH_CN;
+    return Lang::EN;
+}
+
 void lang_init()
 {
     char buf[8];
     if (sd_load_lang(buf, sizeof(buf))) {
-        if (strcmp(buf, "jp") == 0) s_lang = Lang::JP;
-        else                        s_lang = Lang::EN;
+        s_lang = code_to_lang(buf);
         ESP_LOGI(TAG, "Loaded language: %s", buf);
     }
 }
@@ -119,12 +234,22 @@ Lang lang_get() { return s_lang; }
 void lang_set(Lang l)
 {
     s_lang = l;
-    sd_save_lang(l == Lang::JP ? "jp" : "en");
+    sd_save_lang(lang_to_code(l));
 }
 
 const char *tr(StringId id)
 {
     if (id < 0 || id >= STR_COUNT) return "";
-    const char *s = (s_lang == Lang::JP ? JP : EN)[id];
+    const char *const *table;
+    switch (s_lang) {
+        case Lang::JP:    table = JP; break;
+        case Lang::KR:    table = KR; break;
+        case Lang::ZH_CN: table = ZH_CN; break;
+        case Lang::EN:    /* fallthrough */
+        default:          table = EN; break;
+    }
+    const char *s = table[id];
+    // Fall back to EN if a translation entry is missing for this language.
+    if (!s) s = EN[id];
     return s ? s : "";
 }
