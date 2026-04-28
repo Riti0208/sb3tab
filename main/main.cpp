@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -55,6 +56,8 @@ extern BlockResult nopBlock(Block &, Sprite *, bool *, bool);
 __attribute__((used)) static auto *_force_blocks = &nopBlock;
 
 static volatile bool scratch_running = false;
+static volatile bool scratch_paused = false;
+static SemaphoreHandle_t s_runtime_done = nullptr;
 static SemaphoreHandle_t sprite_mutex = nullptr;
 static SWRenderer *renderer = nullptr;
 #if USE_DSI_DISPLAY
@@ -401,6 +404,8 @@ static SemaphoreHandle_t s_render_start = NULL;  // Main → Helper: start work
 static SemaphoreHandle_t s_render_done = NULL;   // Helper → Main: work complete
 static SemaphoreHandle_t s_spr_start = NULL;     // Main → Helper: start sprite rendering
 static SemaphoreHandle_t s_spr_done = NULL;      // Helper → Main: sprites done
+static SemaphoreHandle_t s_helper_exited = NULL; // Helper → Main: task is exiting
+static volatile bool s_helper_run = false;
 
 // Shared state for helper task
 struct RenderHelperState {
@@ -414,6 +419,7 @@ static void render_helper_task(void *param) {
     while (true) {
         // Phase 1: Clear framebuffer (parallel with step on Core 1)
         xSemaphoreTake(s_render_start, portMAX_DELAY);
+        if (!s_helper_run) break;
         if (s_helper_state.renderer) {
             bool cleared = false;
             if (Scratch::stageSprite) {
@@ -432,6 +438,7 @@ static void render_helper_task(void *param) {
 
         // Phase 2: Render even-indexed sprites (parallel with odd on Core 1)
         xSemaphoreTake(s_spr_start, portMAX_DELAY);
+        if (!s_helper_run) break;
         if (s_helper_state.renderer && s_helper_state.sprites) {
             int idx = 0;
             for (auto &sprite : *s_helper_state.sprites) {
@@ -459,6 +466,8 @@ static void render_helper_task(void *param) {
         }
         xSemaphoreGive(s_spr_done);
     }
+    xSemaphoreGive(s_helper_exited);
+    vTaskDelete(NULL);
 }
 
 // ============================================================
@@ -470,11 +479,15 @@ static int64_t s_total_step = 0, s_total_render = 0, s_total_lcd = 0;
 
 static void scratch_runtime_task(void *param)
 {
+    s_frame_count = 0;
+    ESP_LOGI(TAG, "RT: task started");
     // Create render helper on Core 0
     s_render_start = xSemaphoreCreateBinary();
     s_render_done = xSemaphoreCreateBinary();
     s_spr_start = xSemaphoreCreateBinary();
     s_spr_done = xSemaphoreCreateBinary();
+    s_helper_exited = xSemaphoreCreateBinary();
+    s_helper_run = true;
     xTaskCreatePinnedToCore(render_helper_task, "render_helper", 8192, nullptr, 5, nullptr, 0);
 
     // Kick off first clear before entering loop
@@ -483,6 +496,12 @@ static void scratch_runtime_task(void *param)
     xSemaphoreGive(s_render_start);
 
     while (scratch_running) {
+        // Paused (overlay modal showing): skip step + render so nothing touches the DPI FB
+        if (scratch_paused) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
         xSemaphoreTake(sprite_mutex, portMAX_DELAY);
 
         int64_t t0 = esp_timer_get_time();
@@ -541,14 +560,16 @@ static void scratch_runtime_task(void *param)
             g_headless_fb.height = STAGE_H;
             Render::renderMonitors();
 
-            // Swap framebuffer and push to display
+            // Swap framebuffer and push to display (skipped while paused so overlay stays visible)
 #if USE_DSI_DISPLAY
             if (dsi_panel) {
                 uint8_t *completedFb = renderer->swapFramebuffer();
-                dsi_display_update(dsi_panel, completedFb, STAGE_W, STAGE_H);
+                if (!scratch_paused) {
+                    dsi_display_update(dsi_panel, completedFb, STAGE_W, STAGE_H);
+                }
             }
 #else
-            if (lcd_panel && lcd_fb) {
+            if (lcd_panel && lcd_fb && !scratch_paused) {
                 rgb888_to_rgb565_scaled(renderer->getFramebuffer(),
                                         STAGE_W, STAGE_H,
                                         lcd_fb, LCD_W, LCD_H);
@@ -561,6 +582,9 @@ static void scratch_runtime_task(void *param)
             xSemaphoreGive(s_render_start);
 
             s_frame_count++;
+            if ((s_frame_count % 60) == 1) {
+                ESP_LOGI(TAG, "RT: frame %d", s_frame_count);
+            }
             // Frame stats disabled - usb_ll_write blocks when host doesn't read, freezing render loop
         }
         xSemaphoreGive(sprite_mutex);
@@ -569,7 +593,22 @@ static void scratch_runtime_task(void *param)
         vTaskDelay(1);
     }
     scratch_running = false;
-    vTaskDelete(nullptr);
+    ESP_LOGI(TAG, "RT: exiting (frames=%d)", s_frame_count);
+
+    // Shut down render helper cleanly so re-launching the game works
+    s_helper_run = false;
+    xSemaphoreGive(s_render_start);   // unblock if waiting on phase 1
+    xSemaphoreGive(s_spr_start);      // unblock if waiting on phase 2
+    xSemaphoreTake(s_helper_exited, portMAX_DELAY);
+
+    vSemaphoreDelete(s_render_start); s_render_start = nullptr;
+    vSemaphoreDelete(s_render_done);  s_render_done = nullptr;
+    vSemaphoreDelete(s_spr_start);    s_spr_start = nullptr;
+    vSemaphoreDelete(s_spr_done);     s_spr_done = nullptr;
+    vSemaphoreDelete(s_helper_exited); s_helper_exited = nullptr;
+
+    if (s_runtime_done) xSemaphoreGive(s_runtime_done);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 // ============================================================
@@ -655,8 +694,23 @@ static bool load_and_run()
     // Auto-map gamepad buttons based on keys used in project
     auto_map_gamepad();
 
+    if (!s_runtime_done) s_runtime_done = xSemaphoreCreateBinary();
     scratch_running = true;
-    xTaskCreatePinnedToCore(scratch_runtime_task, "scratch_rt", 65536, nullptr, 5, nullptr, 1);
+    TaskHandle_t rt_handle = nullptr;
+    // Allocate the 64KB stack in PSRAM — internal RAM gets fragmented after the first run.
+    BaseType_t rt_ret = xTaskCreatePinnedToCoreWithCaps(
+        scratch_runtime_task, "scratch_rt", 65536, nullptr, 5, &rt_handle, 1,
+        MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "scratch_rt create: ret=%d handle=%p int=%u/%u psram=%u/%u",
+             (int)rt_ret, rt_handle,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    if (rt_ret != pdPASS) {
+        scratch_running = false;
+        return false;
+    }
 
     usb_ll_write("RUNNING\n");
     return true;
@@ -875,7 +929,13 @@ static void game_overlay_check()
         // Wait for release first
         while (gamepad_get_state().buttons & XBOX_START) vTaskDelay(pdMS_TO_TICKS(20));
 
-        if (ui_show_exit_confirm()) {
+        // Let the runtime finish the in-flight frame, then freeze display pushes
+        scratch_paused = true;
+        vTaskDelay(pdMS_TO_TICKS(50));
+
+        bool quit = ui_show_exit_confirm();
+        scratch_paused = false;
+        if (quit) {
             scratch_running = false;
         }
     }
@@ -883,7 +943,10 @@ static void game_overlay_check()
     // Back/Select → show button map
     if (gs.buttons & XBOX_BACK) {
         while (gamepad_get_state().buttons & XBOX_BACK) vTaskDelay(pdMS_TO_TICKS(20));
+        scratch_paused = true;
+        vTaskDelay(pdMS_TO_TICKS(50));
         ui_show_button_map();
+        scratch_paused = false;
     }
 }
 
@@ -1016,9 +1079,28 @@ extern "C" void app_main(void)
             }
         }
 
+        // Wait for runtime task to fully exit (frees its 64KB stack)
+        if (s_runtime_done) {
+            xSemaphoreTake(s_runtime_done, pdMS_TO_TICKS(2000));
+        }
+        // Give the idle task a few ticks to actually reap the deleted TCB+stack
+        vTaskDelay(pdMS_TO_TICKS(100));
+
         // Game ended — clean up and return to menu
         free_assets();
-        // ui_resume() happens at top of next ui_menu_run() iteration
+
+        // Reconnect WiFi using the same full-screen flow as boot
+        {
+            char ssid[64] = {}, pass[128] = {};
+            if (sd_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass))) {
+                ui_resume();  // re-enable LVGL flush so the connecting screen is visible
+                ui_show_wifi_connecting(ssid);
+                bool ok = wifi_connect(ssid, pass, 10000);
+                ui_show_wifi_result(ok, ssid);
+                vTaskDelay(pdMS_TO_TICKS(ok ? 1000 : 2000));
+            }
+        }
+        // ui_resume() happens at top of next ui_menu_run() iteration anyway
     }
 
 #else

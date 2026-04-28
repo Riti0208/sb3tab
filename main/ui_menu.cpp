@@ -981,7 +981,7 @@ MenuAction ui_menu_run()
         }
 
         if (s_state == MenuState::QR_PROJECT) {
-            // Check WiFi
+            // Check WiFi (post-game reconnect runs synchronously in main, so this is rare)
             if (!wifi_is_connected()) {
                 ui_show_status("No WiFi", "Set up WiFi in Settings first");
                 vTaskDelay(pdMS_TO_TICKS(2000));

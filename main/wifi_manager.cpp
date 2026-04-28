@@ -19,6 +19,7 @@ static const char *TAG = "wifi_mgr";
 static EventGroupHandle_t s_wifi_event_group = nullptr;
 static bool s_initialized = false;
 static bool s_connected = false;
+static SemaphoreHandle_t s_wifi_lock = nullptr;
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -43,6 +44,8 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
 void wifi_init()
 {
     if (s_initialized) return;
+
+    s_wifi_lock = xSemaphoreCreateMutex();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -69,7 +72,13 @@ bool wifi_connect(const char *ssid, const char *password, int timeout_ms)
         return false;
     }
 
-    s_connected = false;
+    xSemaphoreTake(s_wifi_lock, portMAX_DELAY);
+
+    if (s_connected) {
+        xSemaphoreGive(s_wifi_lock);
+        return true;  // already connected by a concurrent caller
+    }
+
     s_wifi_event_group = xEventGroupCreate();
 
     wifi_config_t wifi_cfg = {};
@@ -91,11 +100,13 @@ bool wifi_connect(const char *ssid, const char *password, int timeout_ms)
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to '%s'", ssid);
+        xSemaphoreGive(s_wifi_lock);
         return true;
     }
 
     ESP_LOGW(TAG, "Failed to connect to '%s'", ssid);
     esp_wifi_stop();
+    xSemaphoreGive(s_wifi_lock);
     return false;
 }
 
@@ -106,10 +117,12 @@ bool wifi_is_connected()
 
 void wifi_disconnect()
 {
+    if (s_wifi_lock) xSemaphoreTake(s_wifi_lock, portMAX_DELAY);
     esp_wifi_disconnect();
     esp_wifi_stop();
     s_connected = false;
     ESP_LOGI(TAG, "WiFi disconnected");
+    if (s_wifi_lock) xSemaphoreGive(s_wifi_lock);
 }
 
 // HTTP GET with streaming to PSRAM buffer
