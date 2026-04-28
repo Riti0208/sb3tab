@@ -2,6 +2,10 @@ idf_component_register(
     SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
          "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp" "sd_storage.cpp" "gamepad.cpp"
          "es8388_audio.cpp" "ui_menu.cpp" "i18n.cpp"
+         "assets_gen/ui_logo.c"
+         "assets_gen/ui_icon_play.c"
+         "assets_gen/ui_icon_new.c"
+         "assets_gen/ui_icon_settings.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -24,11 +28,6 @@ idf_component_register(
         fatfs
         sdmmc
         usb
-    EMBED_FILES
-        "assets/logo.png"
-        "assets/icon_play.png"
-        "assets/icon_new.png"
-        "assets/icon_settings.png"
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

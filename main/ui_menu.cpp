@@ -33,35 +33,11 @@
 extern "C" const uint8_t noto_sans_ttf_start[] asm("_binary_NotoSansJP_Medium_subset_ttf_start");
 extern "C" const uint8_t noto_sans_ttf_end[]   asm("_binary_NotoSansJP_Medium_subset_ttf_end");
 
-// Embedded UI assets (linked via EMBED_FILES in main/CMakeLists.txt)
-extern "C" const uint8_t logo_png_start[]          asm("_binary_logo_png_start");
-extern "C" const uint8_t logo_png_end[]            asm("_binary_logo_png_end");
-extern "C" const uint8_t icon_play_png_start[]     asm("_binary_icon_play_png_start");
-extern "C" const uint8_t icon_play_png_end[]       asm("_binary_icon_play_png_end");
-extern "C" const uint8_t icon_new_png_start[]      asm("_binary_icon_new_png_start");
-extern "C" const uint8_t icon_new_png_end[]        asm("_binary_icon_new_png_end");
-extern "C" const uint8_t icon_settings_png_start[] asm("_binary_icon_settings_png_start");
-extern "C" const uint8_t icon_settings_png_end[]   asm("_binary_icon_settings_png_end");
-
-static lv_image_dsc_t s_logo_dsc;
-static lv_image_dsc_t s_icon_play_dsc;
-static lv_image_dsc_t s_icon_new_dsc;
-static lv_image_dsc_t s_icon_settings_dsc;
-
-static void init_image_dscs()
-{
-    auto setup = [](lv_image_dsc_t &d, const uint8_t *start, const uint8_t *end, int w, int h) {
-        d.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
-        d.header.w = w;
-        d.header.h = h;
-        d.data = start;
-        d.data_size = (uint32_t)(end - start);
-    };
-    setup(s_logo_dsc,          logo_png_start,          logo_png_end,          512, 128);
-    setup(s_icon_play_dsc,     icon_play_png_start,     icon_play_png_end,     320, 320);
-    setup(s_icon_new_dsc,      icon_new_png_start,      icon_new_png_end,      320, 320);
-    setup(s_icon_settings_dsc, icon_settings_png_start, icon_settings_png_end, 320, 320);
-}
+// Pre-converted UI assets (RGB565A8 dsc declared in assets_gen/ui_*.c)
+extern "C" const lv_image_dsc_t ui_logo;
+extern "C" const lv_image_dsc_t ui_icon_play;
+extern "C" const lv_image_dsc_t ui_icon_new;
+extern "C" const lv_image_dsc_t ui_icon_settings;
 
 // Pick the closest pre-baked Montserrat font for a desired pixel size.
 // Used as a fallback for the JP TTF (NotoSansJP subset doesn't include LV_SYMBOL_*
@@ -405,8 +381,8 @@ static void init_styles()
     lv_style_set_border_width(&s_style_btn_focus, 4);
     lv_style_set_text_color(&s_style_btn_focus, lv_color_hex(SCRATCH_WHITE));
     lv_style_set_shadow_color(&s_style_btn_focus, lv_color_hex(SCRATCH_ORANGE_LT));
-    lv_style_set_shadow_width(&s_style_btn_focus, 24);
-    lv_style_set_shadow_spread(&s_style_btn_focus, 4);
+    lv_style_set_shadow_width(&s_style_btn_focus, 12);
+    lv_style_set_shadow_spread(&s_style_btn_focus, 0);
 
     // Title — white on blue
     lv_style_init(&s_style_title);
@@ -439,7 +415,7 @@ static void init_styles()
     };
     static lv_style_transition_dsc_t focus_trans;
     lv_style_transition_dsc_init(&focus_trans, focus_trans_props,
-                                 lv_anim_path_linear, 80, 0, NULL);
+                                 lv_anim_path_linear, 30, 0, NULL);
     lv_style_set_transition(&s_style_btn,       &focus_trans);
     lv_style_set_transition(&s_style_btn_focus, &focus_trans);
 }
@@ -481,10 +457,9 @@ static lv_obj_t *create_tile_btn(lv_obj_t *parent, const lv_image_dsc_t *icon,
     lv_obj_set_style_pad_row(btn, 8, 0);
     if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
-    // Icon: 320x320 source scaled to ~160px (zoom = 256 * 160/320 = 128)
+    // Icon: 160x160 source displayed at native size (no runtime scaling)
     lv_obj_t *img = lv_image_create(btn);
     lv_image_set_src(img, icon);
-    lv_image_set_scale(img, 128);  // 50% scale → 160x160 displayed
     lv_obj_set_size(img, 160, 160);
     lv_obj_set_style_pad_all(img, 0, 0);
     lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
@@ -545,17 +520,11 @@ static void build_main_menu()
     s_scr_main = lv_obj_create(nullptr);
     lv_obj_add_style(s_scr_main, &s_style_bg, 0);
 
-    // Logo image (replaces "ScratchESP" text — 512x128 RGBA PNG)
+    // Logo image (replaces "ScratchESP" text — 512x128 RGB565A8)
     lv_obj_t *logo = lv_image_create(s_scr_main);
-    lv_image_set_src(logo, &s_logo_dsc);
+    lv_image_set_src(logo, &ui_logo);
     lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 40);
     lv_obj_clear_flag(logo, LV_OBJ_FLAG_CLICKABLE);
-
-    lv_obj_t *subtitle = lv_label_create(s_scr_main);
-    lv_label_set_text(subtitle, tr(STR_SUBTITLE));
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(0xD9E3F7), 0);
-    lv_obj_set_style_text_font(subtitle, menu_font(16), 0);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 180);
 
     // 3-tile container (horizontal flex, big icon-on-top tiles)
     lv_obj_t *cont = lv_obj_create(s_scr_main);
@@ -566,9 +535,9 @@ static void build_main_menu()
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(cont, 32, 0);
 
-    create_tile_btn(cont, &s_icon_play_dsc,     tr(STR_MAIN_GAMES),    on_games_click);
-    create_tile_btn(cont, &s_icon_new_dsc,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
-    create_tile_btn(cont, &s_icon_settings_dsc, tr(STR_MAIN_SETTINGS), on_settings_click);
+    create_tile_btn(cont, &ui_icon_play,     tr(STR_MAIN_GAMES),    on_games_click);
+    create_tile_btn(cont, &ui_icon_new,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
+    create_tile_btn(cont, &ui_icon_settings, tr(STR_MAIN_SETTINGS), on_settings_click);
 
     // Footer: gamepad status
     lv_obj_t *footer = lv_label_create(s_scr_main);
@@ -1208,9 +1177,11 @@ void ui_init(esp_lcd_panel_handle_t panel)
     // Create display in landscape (1280x720)
     s_disp = lv_display_create(LVGL_BUF_W, LVGL_BUF_H);
 
-    // FULL mode: LVGL renders entire screen, flush rotates to DPI panel
+    // DIRECT mode: full-size buffer, but LVGL only re-renders dirty regions.
+    // Saves the cost of repainting unchanged areas (icons/text/shadows) every frame
+    // during focus transitions. Flush still uses full-buffer PPA SRM for simplicity.
     lv_display_set_buffers(s_disp, s_lvgl_buf, nullptr, LVGL_BUF_SIZE,
-                           LV_DISPLAY_RENDER_MODE_FULL);
+                           LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
 
     // Flush callback (PPA rotate 270° → portrait DPI FB)
@@ -1218,9 +1189,6 @@ void ui_init(esp_lcd_panel_handle_t panel)
 
     // Init styles
     init_styles();
-
-    // Init embedded image descriptors (logo + tile icons)
-    init_image_dscs();
 
     // Input device (gamepad as keypad)
     s_indev = lv_indev_create();

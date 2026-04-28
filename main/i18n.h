@@ -9,7 +9,6 @@ enum class Lang : uint8_t {
 };
 
 enum StringId {
-    STR_SUBTITLE,
     STR_FOOTER_HINT,            // "A: Select  B: Back"
     STR_GAMEPAD_OK,             // " Gamepad"
     STR_GAMEPAD_NONE,           // " No Gamepad"

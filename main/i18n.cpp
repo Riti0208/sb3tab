@@ -7,7 +7,6 @@ static const char *TAG = "i18n";
 static Lang s_lang = Lang::EN;
 
 static const char *EN[STR_COUNT] = {
-    [STR_SUBTITLE]          = "Scratch on ESP32-P4",
     [STR_FOOTER_HINT]       = "A: Select  B: Back",
     [STR_GAMEPAD_OK]        = " Gamepad",
     [STR_GAMEPAD_NONE]      = " No Gamepad",
@@ -56,7 +55,6 @@ static const char *EN[STR_COUNT] = {
 };
 
 static const char *JP[STR_COUNT] = {
-    [STR_SUBTITLE]          = "ESP32-P4 で スクラッチ",
     [STR_FOOTER_HINT]       = "A: 決定  B: 戻る",
     [STR_GAMEPAD_OK]        = " ゲームパッド",
     [STR_GAMEPAD_NONE]      = " 未接続",
@@ -105,7 +103,6 @@ static const char *JP[STR_COUNT] = {
 };
 
 static const char *KR[STR_COUNT] = {
-    [STR_SUBTITLE]          = "ESP32-P4의 스크래치",
     [STR_FOOTER_HINT]       = "A: 선택  B: 뒤로",
     [STR_GAMEPAD_OK]        = " 게임패드",
     [STR_GAMEPAD_NONE]      = " 미연결",
@@ -154,7 +151,6 @@ static const char *KR[STR_COUNT] = {
 };
 
 static const char *ZH_CN[STR_COUNT] = {
-    [STR_SUBTITLE]          = "ESP32-P4 上的 Scratch",
     [STR_FOOTER_HINT]       = "A: 选择  B: 返回",
     [STR_GAMEPAD_OK]        = " 手柄",
     [STR_GAMEPAD_NONE]      = " 未连接",
