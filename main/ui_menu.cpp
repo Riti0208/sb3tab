@@ -1259,8 +1259,28 @@ bool ui_show_exit_confirm()
     bool was_disabled = s_flush_disabled;
     capture_game_to_overlay();
     s_confirm_overlay = true;
+
+    // Build & load the confirm screen *before* re-enabling flush, and skip the
+    // fade animation. Otherwise the LVGL buffer (still holding the prior
+    // "STARTING..." status screen) gets pushed for a frame and flashes.
+    s_confirm_result = -1;
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_confirm_screen("Return to Menu?", nullptr);
+    lv_screen_load_anim(s_scr_status, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
+    xSemaphoreGive(s_lvgl_mutex);
+
     s_flush_disabled = false;
-    bool result = ui_show_confirm("Return to Menu?", nullptr);
+
+    while (s_confirm_result < 0) {
+        GamepadState gs = gamepad_get_state();
+        if (gs.buttons & XBOX_B) {
+            while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+            s_confirm_result = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    bool result = (s_confirm_result == 1);
+
     s_confirm_overlay = false;
     s_flush_disabled = was_disabled;
     return result;
