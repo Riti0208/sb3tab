@@ -1,6 +1,6 @@
 #pragma once
 #include "esp_lcd_panel_ops.h"
-#include "gamepad.h"
+#include "input_device.h"
 
 // Menu system states
 enum class MenuState {

@@ -39,7 +39,9 @@
 #include "wifi_manager.h"
 #include "dsi_modal.h"
 #include "sd_storage.h"
-#include "gamepad.h"
+#include "input_device.h"
+#include "input_xbox.h"
+#include "input_gpio.h"
 #include "es8388_audio.h"
 #include "ui_menu.h"
 #include "i18n.h"
@@ -256,40 +258,42 @@ extern "C" void render_set_input_callback(void (*cb)());
 
 #define STICK_DEADZONE 8000
 
-static void gamepad_input_callback()
+// Bridge: hardware InputDev state → Scratch core's named buttons.
+// The Scratch runtime looks up these names in Input::inputControls (populated
+// by auto_map_input() below) to know which key each button represents.
+static void input_to_scratch_callback()
 {
-    GamepadState gs = gamepad_get_state();
-    if (!gs.connected) return;
+    InputDev::State s = InputDev::get();
+    if (!s.any_connected) return;
 
-    uint16_t b = gs.buttons;
-    if (b & XBOX_DPAD_UP)    Input::buttonPress("dpadUp");
-    if (b & XBOX_DPAD_DOWN)  Input::buttonPress("dpadDown");
-    if (b & XBOX_DPAD_LEFT)  Input::buttonPress("dpadLeft");
-    if (b & XBOX_DPAD_RIGHT) Input::buttonPress("dpadRight");
-    if (b & XBOX_A)          Input::buttonPress("A");
-    if (b & XBOX_B)          Input::buttonPress("B");
-    if (b & XBOX_X)          Input::buttonPress("X");
-    if (b & XBOX_Y)          Input::buttonPress("Y");
-    if (b & XBOX_LB)         Input::buttonPress("shoulderL");
-    if (b & XBOX_RB)         Input::buttonPress("shoulderR");
-    if (b & XBOX_START)      Input::buttonPress("start");
-    if (b & XBOX_BACK)       Input::buttonPress("back");
-    if (b & XBOX_LSTICK)     Input::buttonPress("LeftStickPressed");
-    if (b & XBOX_RSTICK)     Input::buttonPress("RightStickPressed");
-    if (gs.left_trigger > 128)  Input::buttonPress("LT");
-    if (gs.right_trigger > 128) Input::buttonPress("RT");
+    using namespace InputDev;
+    uint32_t b = s.buttons;
+    if (b & DPAD_UP)    Input::buttonPress("dpadUp");
+    if (b & DPAD_DOWN)  Input::buttonPress("dpadDown");
+    if (b & DPAD_LEFT)  Input::buttonPress("dpadLeft");
+    if (b & DPAD_RIGHT) Input::buttonPress("dpadRight");
+    if (b & A)          Input::buttonPress("A");
+    if (b & B)          Input::buttonPress("B");
+    if (b & X)          Input::buttonPress("X");
+    if (b & Y)          Input::buttonPress("Y");
+    if (b & LB)         Input::buttonPress("shoulderL");
+    if (b & RB)         Input::buttonPress("shoulderR");
+    if (b & START)      Input::buttonPress("start");
+    if (b & BACK)       Input::buttonPress("back");
+    if (b & LSTICK)     Input::buttonPress("LeftStickPressed");
+    if (b & RSTICK)     Input::buttonPress("RightStickPressed");
+    if (b & LT)         Input::buttonPress("LT");
+    if (b & RT)         Input::buttonPress("RT");
 
-    // Left stick → directional input
-    if (gs.lx > STICK_DEADZONE)  Input::buttonPress("LeftStickRight");
-    if (gs.lx < -STICK_DEADZONE) Input::buttonPress("LeftStickLeft");
-    if (gs.ly > STICK_DEADZONE)  Input::buttonPress("LeftStickUp");
-    if (gs.ly < -STICK_DEADZONE) Input::buttonPress("LeftStickDown");
+    if (s.lx > STICK_DEADZONE)  Input::buttonPress("LeftStickRight");
+    if (s.lx < -STICK_DEADZONE) Input::buttonPress("LeftStickLeft");
+    if (s.ly > STICK_DEADZONE)  Input::buttonPress("LeftStickUp");
+    if (s.ly < -STICK_DEADZONE) Input::buttonPress("LeftStickDown");
 
-    // Right stick
-    if (gs.rx > STICK_DEADZONE)  Input::buttonPress("RightStickRight");
-    if (gs.rx < -STICK_DEADZONE) Input::buttonPress("RightStickLeft");
-    if (gs.ry > STICK_DEADZONE)  Input::buttonPress("RightStickUp");
-    if (gs.ry < -STICK_DEADZONE) Input::buttonPress("RightStickDown");
+    if (s.rx > STICK_DEADZONE)  Input::buttonPress("RightStickRight");
+    if (s.rx < -STICK_DEADZONE) Input::buttonPress("RightStickLeft");
+    if (s.ry > STICK_DEADZONE)  Input::buttonPress("RightStickUp");
+    if (s.ry < -STICK_DEADZONE) Input::buttonPress("RightStickDown");
 }
 
 // ============================================================
@@ -640,7 +644,7 @@ static bool load_and_run()
         Render::Init();
         render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
         render_set_costume_size_callback(costume_size_cb);
-        render_set_input_callback(gamepad_input_callback);
+        render_set_input_callback(input_to_scratch_callback);
         render_initialized = true;
     }
 
@@ -938,17 +942,16 @@ static void save_current_project_to_sd(const char *project_id)
 }
 
 // ============================================================
-// In-game gamepad polling for Start/Select
+// In-game polling for Start/Select system buttons
 // ============================================================
 
 static void game_overlay_check()
 {
-    GamepadState gs = gamepad_get_state();
+    InputDev::State s = InputDev::get();
 
     // Start → exit confirm
-    if (gs.buttons & XBOX_START) {
-        // Wait for release first
-        while (gamepad_get_state().buttons & XBOX_START) vTaskDelay(pdMS_TO_TICKS(20));
+    if (s.buttons & InputDev::START) {
+        while (InputDev::get().buttons & InputDev::START) vTaskDelay(pdMS_TO_TICKS(20));
 
         // Let the runtime finish the in-flight frame, then freeze display pushes
         scratch_paused = true;
@@ -962,8 +965,8 @@ static void game_overlay_check()
     }
 
     // Back/Select → show button map
-    if (gs.buttons & XBOX_BACK) {
-        while (gamepad_get_state().buttons & XBOX_BACK) vTaskDelay(pdMS_TO_TICKS(20));
+    if (s.buttons & InputDev::BACK) {
+        while (InputDev::get().buttons & InputDev::BACK) vTaskDelay(pdMS_TO_TICKS(20));
         scratch_paused = true;
         vTaskDelay(pdMS_TO_TICKS(50));
         ui_show_button_map();
@@ -999,7 +1002,8 @@ extern "C" void app_main(void)
 #endif
 
     vTaskDelay(pdMS_TO_TICKS(500));
-    gamepad_init();
+    input_xbox_init();
+    input_gpio_init();
     sd_init();
 
     // Load saved UI language (depends on SD being mounted; defaults to EN)

@@ -4,7 +4,7 @@
 #include "ui_menu.h"
 #include "dsi_display.h"
 #include "dsi_modal.h"
-#include "gamepad.h"
+#include "input_device.h"
 #include "sd_storage.h"
 #include "wifi_manager.h"
 #include "camera_qr.h"
@@ -124,7 +124,7 @@ static lv_group_t *s_group = nullptr;
 static TaskHandle_t s_lvgl_task = nullptr;
 static SemaphoreHandle_t s_lvgl_mutex = nullptr;
 
-// (gamepad state read directly in indev callback)
+// (input state read directly in indev callback)
 
 // When true, LVGL flush is a no-op (camera/game owns DPI FB)
 static volatile bool s_flush_disabled = false;
@@ -222,20 +222,21 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 }
 
 // ============================================================
-// LVGL input read callback — gamepad to keypad
+// LVGL input read callback — InputDev to keypad
 // ============================================================
 
 static int s_dbg_cnt = 0;
 
 static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    GamepadState gs = gamepad_get_state();
-    uint16_t b = gs.buttons;
+    InputDev::State gs = InputDev::get();
+    uint32_t b = gs.buttons;
 
     // Debug: log every 60th call (~1/sec) and whenever buttons pressed
     s_dbg_cnt++;
     if (b != 0 || (s_dbg_cnt % 60 == 0)) {
-        ESP_LOGI("indev", "btn=0x%04X conn=%d grp_cnt=%u", b, gs.connected,
+        ESP_LOGI("indev", "btn=0x%08lX conn=%d grp_cnt=%u",
+                 (unsigned long)b, gs.any_connected,
                  s_group ? (unsigned)lv_group_get_obj_count(s_group) : 0);
     }
 
@@ -255,22 +256,22 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             dropdown_open = lv_dropdown_is_open(focused);
         }
     }
-    if (b & XBOX_DPAD_UP) {
+    if (b & InputDev::DPAD_UP) {
         data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_DPAD_DOWN) {
+    } else if (b & InputDev::DPAD_DOWN) {
         data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_DPAD_LEFT) {
+    } else if (b & InputDev::DPAD_LEFT) {
         data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_DPAD_RIGHT) {
+    } else if (b & InputDev::DPAD_RIGHT) {
         data->key = editing ? LV_KEY_RIGHT : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_A) {
+    } else if (b & InputDev::A) {
         data->key = LV_KEY_ENTER;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & XBOX_B) {
+    } else if (b & InputDev::B) {
         data->key = LV_KEY_ESC;
         data->state = LV_INDEV_STATE_PRESSED;
     }
@@ -539,14 +540,15 @@ static void build_main_menu()
     create_tile_btn(cont, &ui_icon_new,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
     create_tile_btn(cont, &ui_icon_settings, tr(STR_MAIN_SETTINGS), on_settings_click);
 
-    // Footer: gamepad status
+    // Footer: input device status
     lv_obj_t *footer = lv_label_create(s_scr_main);
     lv_obj_set_style_text_color(footer, lv_color_hex(0xB3CDFF), 0);
     lv_obj_set_style_text_font(footer, menu_font(14), 0);
     lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -20);
+    bool conn = InputDev::any_connected();
     lv_label_set_text_fmt(footer, "%s  %s%s", tr(STR_FOOTER_HINT),
-                          gamepad_connected() ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
-                          gamepad_connected() ? tr(STR_GAMEPAD_OK) : tr(STR_GAMEPAD_NONE));
+                          conn ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                          conn ? tr(STR_GAMEPAD_OK) : tr(STR_GAMEPAD_NONE));
 }
 
 // ============================================================
@@ -1256,8 +1258,8 @@ MenuAction ui_menu_run()
                             }
                         }
                     }
-                    GamepadState gs = gamepad_get_state();
-                    if (gs.buttons & (XBOX_B | XBOX_BACK | XBOX_START)) break;
+                    InputDev::State gs = InputDev::get();
+                    if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 camera_deinit();
@@ -1311,8 +1313,8 @@ MenuAction ui_menu_run()
                         }
                     }
                     if (got_project) break;  // exit immediately
-                    GamepadState gs = gamepad_get_state();
-                    if (gs.buttons & (XBOX_B | XBOX_BACK | XBOX_START)) {
+                    InputDev::State gs = InputDev::get();
+                    if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
                         ESP_LOGI(TAG, "QR: back button pressed");
                         break;
                     }
@@ -1352,7 +1354,7 @@ MenuAction ui_menu_run()
         // Global B = back (one screen up). Confirm/QR screens handle B themselves.
         {
             static bool s_b_prev = false;
-            bool b_now = (gamepad_get_state().buttons & XBOX_B) != 0;
+            bool b_now = (InputDev::get().buttons & InputDev::B) != 0;
             if (b_now && !s_b_prev) {
                 if (s_state == MenuState::GAME_LIST || s_state == MenuState::SETTINGS) {
                     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
@@ -1360,7 +1362,7 @@ MenuAction ui_menu_run()
                     show_screen(s_scr_main);
                     xSemaphoreGive(s_lvgl_mutex);
                     s_state = MenuState::MAIN_MENU;
-                    while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+                    while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
                 }
             }
             s_b_prev = b_now;
@@ -1369,7 +1371,7 @@ MenuAction ui_menu_run()
         // Edge-detect X press in game list → delete focused entry
         if (s_state == MenuState::GAME_LIST) {
             static bool s_x_prev = false;
-            bool x_now = (gamepad_get_state().buttons & XBOX_X) != 0;
+            bool x_now = (InputDev::get().buttons & InputDev::X) != 0;
             if (x_now && !s_x_prev) {
                 xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
                 lv_obj_t *focused = lv_group_get_focused(s_group);
@@ -1386,7 +1388,7 @@ MenuAction ui_menu_run()
                     show_screen(s_scr_games);
                     xSemaphoreGive(s_lvgl_mutex);
                     // Wait for X release before continuing
-                    while (gamepad_get_state().buttons & XBOX_X) vTaskDelay(pdMS_TO_TICKS(20));
+                    while (InputDev::get().buttons & InputDev::X) vTaskDelay(pdMS_TO_TICKS(20));
                 }
             }
             s_x_prev = x_now;
@@ -1437,9 +1439,9 @@ bool ui_show_exit_confirm()
     s_flush_disabled = false;
 
     while (s_confirm_result < 0) {
-        GamepadState gs = gamepad_get_state();
-        if (gs.buttons & XBOX_B) {
-            while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+        InputDev::State gs = InputDev::get();
+        if (gs.buttons & InputDev::B) {
+            while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
             s_confirm_result = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(30));
@@ -1560,10 +1562,10 @@ bool ui_show_confirm(const char *title, const char *detail)
 
     // Block until user responds
     while (s_confirm_result < 0) {
-        // Also check raw gamepad for B = cancel
-        GamepadState gs = gamepad_get_state();
-        if (gs.buttons & XBOX_B) {
-            while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+        // Also check raw input for B = cancel
+        InputDev::State gs = InputDev::get();
+        if (gs.buttons & InputDev::B) {
+            while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
             s_confirm_result = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(30));
