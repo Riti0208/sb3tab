@@ -5,6 +5,7 @@
 #include "lunasvg.h"
 #endif
 #include <cstddef>
+#include <functional>
 #include <memory.h>
 #include <miniz.h>
 #include <sprite.hpp>
@@ -79,6 +80,13 @@ class Image {
      * Set if an error occurs in the constructor.
      */
     std::optional<std::string> error;
+
+    // Optional memory provider: when set, readFileToBuffer() consults this
+    // before falling back to fopen(). Used by ESP32 path that holds project
+    // assets in PSRAM (g_assets) instead of on the filesystem.
+    using MemoryProvider = std::function<nonstd::expected<std::vector<unsigned char>, std::string>(const std::string &filePath)>;
+    static void setMemoryProvider(MemoryProvider p);
+
     Image() {}
     Image(std::string filePath, bool fromScratchProject = true, bool bitmapHalfQuality = false, float scale = 1);
     Image(std::string filePath, mz_zip_archive *zip, bool bitmapHalfQuality = false, float scale = 1);

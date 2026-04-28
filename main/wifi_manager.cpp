@@ -127,9 +127,17 @@ void wifi_disconnect()
 
 // HTTP GET with streaming to PSRAM buffer
 uint8_t *wifi_http_get(const char *url, size_t *out_len,
-                       std::function<void(size_t, size_t)> progress_cb)
+                       std::function<void(size_t, size_t)> progress_cb,
+                       bool skip_cert_check)
 {
+    (void)skip_cert_check;
     *out_len = 0;
+
+    // Log heap state at start of HTTPS request (TLS handshake needs internal RAM)
+    ESP_LOGI(TAG, "wifi_http_get: heap internal=%u (largest=%u) psram=%u",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     esp_http_client_config_t config = {};
     config.url = url;

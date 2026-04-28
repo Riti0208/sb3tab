@@ -23,4 +23,5 @@ void wifi_disconnect();
 // Returns allocated buffer (caller must heap_caps_free) and sets out_len.
 // Returns nullptr on failure.
 uint8_t *wifi_http_get(const char *url, size_t *out_len,
-                       std::function<void(size_t, size_t)> progress_cb = nullptr);
+                       std::function<void(size_t, size_t)> progress_cb = nullptr,
+                       bool skip_cert_check = false);

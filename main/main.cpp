@@ -27,6 +27,7 @@
 #include <unzip.hpp>
 #include <render.hpp>
 #include <blockExecutor.hpp>
+#include <image.hpp>
 #include <nlohmann/json.hpp>
 
 #include <audio.hpp>
@@ -645,6 +646,22 @@ static bool load_and_run()
         render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
         render_set_costume_size_callback(costume_size_cb);
         render_set_input_callback(input_to_scratch_callback);
+        // Serve image bytes from in-memory g_assets when scratch_core's
+        // Image::readFileToBuffer() is asked for "project/<hash>.<ext>".
+        Image::setMemoryProvider([](const std::string &filePath)
+            -> nonstd::expected<std::vector<unsigned char>, std::string> {
+            std::string name = filePath;
+            const std::string prefix = "project/";
+            if (name.compare(0, prefix.size(), prefix) == 0) {
+                name = name.substr(prefix.size());
+            }
+            for (auto &asset : g_assets) {
+                if (asset.name == name) {
+                    return std::vector<unsigned char>(asset.data, asset.data + asset.len);
+                }
+            }
+            return nonstd::make_unexpected("not in memory: " + filePath);
+        });
         render_initialized = true;
     }
 

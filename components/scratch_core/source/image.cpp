@@ -151,6 +151,11 @@ nonstd::expected<std::shared_ptr<Image>, std::string> createImageFromZip(std::st
     return img;
 }
 
+static Image::MemoryProvider g_imageMemoryProvider;
+void Image::setMemoryProvider(Image::MemoryProvider p) {
+    g_imageMemoryProvider = std::move(p);
+}
+
 nonstd::expected<std::vector<unsigned char>, std::string> Image::readFileToBuffer(const std::string &filePath, bool fromScratchProject) {
 #ifdef USE_CMAKERC
     if (!Unzip::UnpackedInSD || !fromScratchProject) {
@@ -161,6 +166,13 @@ nonstd::expected<std::vector<unsigned char>, std::string> Image::readFileToBuffe
         return buffer;
     }
 #endif
+
+    // Memory-resident asset lookup (ESP32 path keeps assets in PSRAM)
+    if (g_imageMemoryProvider && fromScratchProject) {
+        auto mem = g_imageMemoryProvider(filePath);
+        if (mem.has_value()) return mem;
+        // fall through to fopen on miss; provider error message ignored
+    }
 
     std::string path = filePath;
 

@@ -34,6 +34,7 @@ struct PCMSound {
     size_t num_samples;
     int sample_rate;
     bool loaded;
+    bool failed;            // permanent failure marker — don't retry download/decode
     bool playing;
     size_t play_pos;
     float volume;           // 0.0 - 1.0
@@ -378,17 +379,23 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
                                           const bool &fromCache) {
     if (!init()) return;
 
-    // Already loaded? Just play it
+    // Already loaded or previously failed? Skip download
     if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         auto it = s_sounds.find(soundId);
-        if (it != s_sounds.end() && it->second.loaded) {
-            it->second.play_pos = 0;
-            it->second.frac_pos = 0.0f;
-            it->second.playing = true;
-            if (sprite) it->second.volume = sprite->volume / 100.0f;
-            xSemaphoreGive(s_audio_mutex);
-            ESP_LOGI(TAG, "Playing cached sound: %s", soundId.c_str());
-            return;
+        if (it != s_sounds.end()) {
+            if (it->second.failed) {
+                xSemaphoreGive(s_audio_mutex);
+                return;  // permanent failure, don't retry
+            }
+            if (it->second.loaded) {
+                it->second.play_pos = 0;
+                it->second.frac_pos = 0.0f;
+                it->second.playing = true;
+                if (sprite) it->second.volume = sprite->volume / 100.0f;
+                xSemaphoreGive(s_audio_mutex);
+                ESP_LOGI(TAG, "Playing cached sound: %s", soundId.c_str());
+                return;
+            }
         }
         xSemaphoreGive(s_audio_mutex);
     }
@@ -397,7 +404,13 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
     ESP_LOGI(TAG, "Downloading sound: %s", soundId.c_str());
     AudioDLBuf raw = download_sound(soundId.c_str());
     if (!raw.data || raw.len == 0) {
-        ESP_LOGE(TAG, "Failed to download sound: %s", soundId.c_str());
+        ESP_LOGE(TAG, "Failed to download sound: %s — marking as failed", soundId.c_str());
+        if (xSemaphoreTake(s_audio_mutex, portMAX_DELAY) == pdTRUE) {
+            PCMSound failed_pcm = {};
+            failed_pcm.failed = true;
+            s_sounds[soundId] = failed_pcm;
+            xSemaphoreGive(s_audio_mutex);
+        }
         return;
     }
 
@@ -406,7 +419,13 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
     heap_caps_free(raw.data);
 
     if (!pcm.loaded) {
-        ESP_LOGE(TAG, "Failed to decode sound: %s", soundId.c_str());
+        ESP_LOGE(TAG, "Failed to decode sound: %s — marking as failed", soundId.c_str());
+        if (xSemaphoreTake(s_audio_mutex, portMAX_DELAY) == pdTRUE) {
+            PCMSound failed_pcm = {};
+            failed_pcm.failed = true;
+            s_sounds[soundId] = failed_pcm;
+            xSemaphoreGive(s_audio_mutex);
+        }
         return;
     }
 
@@ -430,7 +449,13 @@ bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t 
 
     PCMSound pcm = decode_wav(data, len);
     if (!pcm.loaded) {
-        ESP_LOGE(TAG, "Failed to decode sound from memory: %s", soundId.c_str());
+        ESP_LOGE(TAG, "Failed to decode sound from memory: %s — marking as failed", soundId.c_str());
+        if (xSemaphoreTake(s_audio_mutex, portMAX_DELAY) == pdTRUE) {
+            PCMSound failed_pcm = {};
+            failed_pcm.failed = true;
+            s_sounds[soundId] = failed_pcm;
+            xSemaphoreGive(s_audio_mutex);
+        }
         return false;
     }
 

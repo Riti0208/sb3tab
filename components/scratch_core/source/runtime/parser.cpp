@@ -7,6 +7,9 @@
 #include <runtime.hpp>
 #include <settings.hpp>
 #include <unzip.hpp>
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#endif
 #if defined(__WIIU__) && defined(ENABLE_CLOUDVARS)
 #include <whb/sdcard.h>
 #endif
@@ -123,13 +126,16 @@ void Parser::loadUsernameFromSettings() {
 
 void Parser::loadSprites(const nlohmann::json &json) {
     Log::log("beginning to load sprites...");
+    int spriteIdx = 0;
     for (const auto &target : json["targets"]) { // "target" is sprite in Scratch speak, so for every sprite in sprites
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: new Sprite()");
         Sprite *newSprite = new Sprite();
         // new (newSprite) Sprite();
         if (target.contains("name")) {
             newSprite->name = target["name"].get<std::string>();
         }
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: name=" + newSprite->name);
         if (target.contains("isStage")) {
             newSprite->isStage = target["isStage"].get<bool>();
         }
@@ -172,6 +178,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
         newSprite->isClone = false;
         // std::cout<<"name = "<< newSprite.name << std::endl;
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: vars start");
         // set variables
         for (const auto &[id, data] : target["variables"].items()) {
 
@@ -186,6 +193,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
             newSprite->variables[newVariable.id] = newVariable; // add variable to sprite
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: blocks start (" + std::to_string(target["blocks"].size()) + ")");
         // set Blocks
         for (const auto &[id, data] : target["blocks"].items()) {
             Block newBlock;
@@ -311,8 +319,14 @@ void Parser::loadSprites(const nlohmann::json &json) {
                             newCustomBlock.argumentDefaults.push_back(item.get<std::string>());
                         } else if (item.is_number()) {
                             newCustomBlock.argumentDefaults.push_back(Math::toString(item.get<double>()));
+                        } else if (item.is_boolean()) {
+                            newCustomBlock.argumentDefaults.push_back(item.get<bool>() ? "true" : "false");
+                        } else if (item.is_null()) {
+                            newCustomBlock.argumentDefaults.push_back("");
                         } else {
-                            newCustomBlock.argumentDefaults.push_back(item.dump());
+                            // Avoid .dump() — see monitor-loop note: shared_ptr+pthread_mutex
+                            // chain may fail under tight internal RAM.
+                            newCustomBlock.argumentDefaults.push_back("");
                         }
                     }
 
@@ -330,11 +344,13 @@ void Parser::loadSprites(const nlohmann::json &json) {
                 }
             }
         }
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: blocksMap");
         // setup blocksMap
         for (auto &block : newSprite->blocks) {
             newSprite->blocksMap[block.id] = &block;
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: lists");
         // set Lists
         for (const auto &[id, data] : target["lists"].items()) {
             auto result = newSprite->lists.try_emplace(id).first;
@@ -346,6 +362,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
                 newList.items.push_back(Value::fromJson(listItem));
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: sounds");
         // set Sounds
         for (const auto &[id, data] : target["sounds"].items()) {
             Sound newSound;
@@ -358,6 +375,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
             newSprite->sounds.push_back(newSound);
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: costumes");
         // set Costumes
         for (const auto &[id, data] : target["costumes"].items()) {
             Costume newCostume;
@@ -392,6 +410,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
             newSprite->costumes.push_back(newCostume);
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: comments");
         // set comments
         for (const auto &[id, data] : target["comments"].items()) {
             if (!newSprite->isStage) continue;
@@ -409,6 +428,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
             newSprite->comments[newComment.id] = newComment;
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: broadcasts");
         // set Broadcasts
         for (const auto &[id, data] : target["broadcasts"].items()) {
             Broadcast newBroadcast;
@@ -418,11 +438,24 @@ void Parser::loadSprites(const nlohmann::json &json) {
             // std::cout<<"broadcast name = "<< newBroadcast.name << std::endl;
         }
 
+        Log::log("LS[" + std::to_string(spriteIdx) + "]: pushing sprite");
         Scratch::sprites.push_back(newSprite);
         if (newSprite->isStage) Scratch::stageSprite = newSprite;
+        spriteIdx++;
     }
 
+    Log::log("LS: all sprites done, sortSprites()");
     Scratch::sortSprites();
+#ifdef ESP_PLATFORM
+    {
+        char hb[128];
+        snprintf(hb, sizeof(hb), "LS: heap before monitors: internal=%u (largest=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        Log::log(hb);
+    }
+#endif
+    Log::log("LS: monitors start");
 
     for (const auto &monitor : json["monitors"]) { // "monitor" is any variable shown on screen
         Monitor newMonitor;
@@ -439,7 +472,16 @@ void Parser::loadSprites(const nlohmann::json &json) {
         if (monitor.contains("params") && monitor["params"].is_object()) {
             for (const auto &param : monitor["params"].items()) {
                 std::string key = param.key();
-                std::string value = param.value().dump();
+                // Avoid nlohmann::json::dump() — its internal shared_ptr+pthread_mutex
+                // requires several internal RAM allocations that may fail under tight heap.
+                std::string value;
+                const auto &v = param.value();
+                if (v.is_string()) value = v.get<std::string>();
+                else if (v.is_number_integer()) value = std::to_string(v.get<long long>());
+                else if (v.is_number()) value = std::to_string(v.get<double>());
+                else if (v.is_boolean()) value = v.get<bool>() ? "true" : "false";
+                else if (v.is_null()) value = "null";
+                // arrays/objects: leave empty (rare for monitor params)
                 newMonitor.parameters[key] = value;
             }
         }
@@ -449,8 +491,13 @@ void Parser::loadSprites(const nlohmann::json &json) {
         else
             newMonitor.spriteName = "";
 
-        if (monitor.contains("value") && !monitor["value"].is_null())
-            newMonitor.value = Value(Math::removeQuotations(monitor.at("value").dump()));
+        if (monitor.contains("value") && !monitor["value"].is_null()) {
+            // Avoid dump() — same reason as above. Use direct typed extraction.
+            const auto &mv = monitor.at("value");
+            if (mv.is_string()) newMonitor.value = Value(mv.get<std::string>());
+            else if (mv.is_number()) newMonitor.value = Value(mv.get<double>());
+            else if (mv.is_boolean()) newMonitor.value = Value(mv.get<bool>() ? std::string("true") : std::string("false"));
+        }
 
         if (monitor.contains("x") && !monitor["x"].is_null())
             newMonitor.x = monitor.at("x").get<int>();
