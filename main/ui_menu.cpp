@@ -133,10 +133,22 @@ static volatile bool s_flush_disabled = false;
 static MenuState s_state = MenuState::MAIN_MENU;
 static MenuAction s_action = MenuAction::NONE;
 static char s_selected_project_id[64] = {};
+// True when QR_WIFI was entered from the settings card; the QR flow returns
+// to settings instead of the main menu when this is set.
+static bool s_qr_wifi_from_settings = false;
 
 // Settings
-static int s_brightness = 100;
-static bool s_muted = false;
+// Brightness/volume are stored as 10%-step counts (1..10 for brightness,
+// 0..10 for volume). The on-screen label shows step*10 + "%". This keeps the
+// slider chunky enough that one d-pad press = 10%, which is comfortable for
+// kids while still letting touch drag pick any level.
+static int s_brightness_step = 10;   // 1..10  (=10%..100%)
+static int s_volume_step = 8;        // 0..10  (0=mute, =0%..100%)
+static bool s_muted = false;         // legacy; reflects (s_volume_step == 0)
+
+#define BRIGHTNESS_MAX_STEP 10
+#define VOLUME_MAX_STEP     10
+#define STEP_TO_PCT(s)      ((s) * 10)
 
 // ============================================================
 // LVGL draw buffer (landscape 1280x720 RGB565 in PSRAM)
@@ -250,12 +262,18 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     // (LV_KEY_UP/DOWN) instead of jumping to the previous/next group widget.
     bool editing = s_group && lv_group_get_editing(s_group);
     bool dropdown_open = false;
+    bool slider_focused = false;
     if (s_group) {
         lv_obj_t *focused = lv_group_get_focused(s_group);
         if (focused && lv_obj_check_type(focused, &lv_dropdown_class)) {
             dropdown_open = lv_dropdown_is_open(focused);
         }
+        if (focused && lv_obj_check_type(focused, &lv_slider_class)) {
+            slider_focused = true;
+        }
     }
+    // Slider focused → LEFT/RIGHT directly adjusts value (no edit-mode needed)
+    bool horiz_adjusts = slider_focused || editing;
     if (b & InputDev::DPAD_UP) {
         data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
@@ -263,10 +281,10 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & InputDev::DPAD_LEFT) {
-        data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
+        data->key = horiz_adjusts ? LV_KEY_LEFT : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & InputDev::DPAD_RIGHT) {
-        data->key = editing ? LV_KEY_RIGHT : LV_KEY_NEXT;
+        data->key = horiz_adjusts ? LV_KEY_RIGHT : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & InputDev::A) {
         data->key = LV_KEY_ENTER;
@@ -286,10 +304,10 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
             data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.lx < -DZ) {
-            data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
+            data->key = horiz_adjusts ? LV_KEY_LEFT : LV_KEY_PREV;
             data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.lx > DZ) {
-            data->key = editing ? LV_KEY_RIGHT : LV_KEY_NEXT;
+            data->key = horiz_adjusts ? LV_KEY_RIGHT : LV_KEY_NEXT;
             data->state = LV_INDEV_STATE_PRESSED;
         }
     }
@@ -475,6 +493,46 @@ static lv_obj_t *create_tile_btn(lv_obj_t *parent, const lv_image_dsc_t *icon,
 
     lv_group_add_obj(s_group, btn);
     return btn;
+}
+
+// ============================================================
+// Settings card — full-width white rounded row with a left label and a
+// right-side content area. Used for the stacked settings layout.
+// Returns the inner content slot (right side); caller adds widgets there.
+// ============================================================
+
+static lv_obj_t *create_settings_card(lv_obj_t *parent, const char *label_text)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, 110);
+    lv_obj_set_style_bg_color(card, lv_color_hex(SCRATCH_CARD), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 24, 0);
+    lv_obj_set_style_shadow_color(card, lv_color_hex(0x00000040), 0);
+    lv_obj_set_style_shadow_width(card, 8, 0);
+    lv_obj_set_style_shadow_ofs_y(card, 3, 0);
+    lv_obj_set_style_pad_all(card, 24, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(card, 16, 0);
+
+    lv_obj_t *label = lv_label_create(card);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_style_text_font(label, menu_font(22), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(SCRATCH_TEXT), 0);
+    lv_obj_set_width(label, 220);
+
+    // Content slot — fills the remaining width
+    lv_obj_t *content = lv_obj_create(card);
+    lv_obj_remove_style_all(content);
+    lv_obj_set_height(content, lv_pct(100));
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(content, 16, 0);
+    return content;
 }
 
 // ============================================================
@@ -665,25 +723,49 @@ static void build_game_list()
 // Settings Screen
 // ============================================================
 
-static lv_obj_t *s_brightness_label = nullptr;
+static lv_obj_t *s_brightness_value_lbl = nullptr;
+static lv_obj_t *s_volume_value_lbl = nullptr;
 
-static void on_brightness_change(lv_event_t *e) {
+// Stable order for the language picker. New languages can be appended here
+// without breaking the settings screen layout (the settings card just shows
+// the currently selected language; the picker subscreen scales to N entries).
+static const struct { Lang lang; const char *display; } LANG_LIST[] = {
+    { Lang::EN,    "English"  },
+    { Lang::JP,    "日本語"    },
+    { Lang::KR,    "한국어"    },
+    { Lang::ZH_CN, "简体中文"  },
+};
+static const int LANG_COUNT = sizeof(LANG_LIST) / sizeof(LANG_LIST[0]);
+
+static void on_brightness_slider(lv_event_t *e) {
     lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
-    int val = lv_slider_get_value(slider);
-    s_brightness = val * 10;
-    dsi_backlight_set(s_brightness);
-    if (s_brightness_label) {
-        lv_label_set_text_fmt(s_brightness_label, "%d%%", s_brightness);
+    int step = lv_slider_get_value(slider);
+    if (step < 1) step = 1;
+    s_brightness_step = step;
+    int pct = STEP_TO_PCT(step);
+    dsi_backlight_set(pct);
+    if (s_brightness_value_lbl) {
+        lv_label_set_text_fmt(s_brightness_value_lbl, "%d%%", pct);
     }
+    sd_save_brightness(pct);
 }
 
-static void on_mute_toggle(lv_event_t *e) {
-    lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
-    s_muted = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    es8388_set_mute(s_muted);
+static void on_volume_slider(lv_event_t *e) {
+    lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
+    int step = lv_slider_get_value(slider);
+    if (step < 0) step = 0;
+    s_volume_step = step;
+    s_muted = (step == 0);
+    es8388_set_volume(step, VOLUME_MAX_STEP);
+    int pct = STEP_TO_PCT(step);
+    if (s_volume_value_lbl) {
+        lv_label_set_text_fmt(s_volume_value_lbl, "%d%%", pct);
+    }
+    sd_save_volume(pct);
 }
 
 static void on_network_qr(lv_event_t *e) {
+    s_qr_wifi_from_settings = true;
     s_state = MenuState::QR_WIFI;
 }
 
@@ -693,42 +775,69 @@ static void on_settings_back(lv_event_t *e) {
     s_state = MenuState::MAIN_MENU;
 }
 
-// Language dropdown — option index → Lang. Order must match the options string below.
-static const Lang LANG_OPTIONS[] = { Lang::EN, Lang::JP, Lang::KR, Lang::ZH_CN };
-static const char *LANG_DD_TEXT = "English\n日本語\n한국어\n简体中文";
-
-static int lang_to_index(Lang l) {
-    for (int i = 0; i < (int)(sizeof(LANG_OPTIONS) / sizeof(LANG_OPTIONS[0])); i++) {
-        if (LANG_OPTIONS[i] == l) return i;
-    }
-    return 0;
-}
-
 static void on_language_change(lv_event_t *e) {
     lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
     int idx = (int)lv_dropdown_get_selected(dd);
-    if (idx < 0 || idx >= (int)(sizeof(LANG_OPTIONS) / sizeof(LANG_OPTIONS[0]))) return;
-    Lang new_lang = LANG_OPTIONS[idx];
+    if (idx < 0 || idx >= LANG_COUNT) return;
+    Lang new_lang = LANG_LIST[idx].lang;
     if (new_lang == lang_get()) return;
     lang_set(new_lang);
     build_settings();
     show_screen(s_scr_settings);
 }
 
-// Apply the JP-capable font to the dropdown's popup list when it opens, so
-// "日本語" renders correctly (the list is created lazily by LVGL).
+// Apply the JP-capable font and Scratch styling to the dropdown's popup list
+// when it opens, so 日本語 / 한국어 / 简体中文 render correctly.
 static void on_language_dropdown_open(lv_event_t *e) {
     lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
     lv_obj_t *list = lv_dropdown_get_list(dd);
     if (!list) return;
-    lv_obj_set_style_text_font(list, menu_font(18), 0);
+    lv_font_t *jp = get_jp_font(22);
+    lv_obj_set_style_text_font(list, jp ? jp : &lv_font_montserrat_20, 0);
     lv_obj_set_style_bg_color(list, lv_color_hex(SCRATCH_CARD), 0);
     lv_obj_set_style_text_color(list, lv_color_hex(SCRATCH_TEXT), 0);
-    lv_obj_set_style_radius(list, 12, 0);
-    lv_obj_set_style_pad_all(list, 8, 0);
+    lv_obj_set_style_radius(list, 16, 0);
+    lv_obj_set_style_pad_all(list, 12, 0);
+    lv_obj_set_style_shadow_color(list, lv_color_hex(0x00000060), 0);
+    lv_obj_set_style_shadow_width(list, 16, 0);
     // Highlight selected/focused item with Scratch orange
-    lv_obj_set_style_bg_color(list, lv_color_hex(SCRATCH_ORANGE), LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(list, lv_color_hex(SCRATCH_WHITE), LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(list, lv_color_hex(SCRATCH_ORANGE),
+                              (lv_style_selector_t)LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(list, lv_color_hex(SCRATCH_WHITE),
+                                (lv_style_selector_t)LV_PART_SELECTED | LV_STATE_CHECKED);
+}
+
+static int lang_to_index(Lang l) {
+    for (int i = 0; i < LANG_COUNT; i++) {
+        if (LANG_LIST[i].lang == l) return i;
+    }
+    return 0;
+}
+
+// Configure a chunky horizontal slider styled for kid-friendly touch use.
+// Sized so the knob (track_h + pad*2 + border) fits within a 110px settings
+// card minus 24px top/bottom padding (= 62px usable). Knob height = 28+10*2
+// = 48px including border, leaves ~7px breathing room top/bottom.
+static void style_chunky_slider(lv_obj_t *s, int min, int max, int value) {
+    lv_slider_set_range(s, min, max);
+    lv_slider_set_value(s, value, LV_ANIM_OFF);
+    lv_obj_set_style_height(s, 28, LV_PART_MAIN);
+    lv_obj_set_style_radius(s, 14, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s, lv_color_hex(0xE2E8F0), LV_PART_MAIN);
+    lv_obj_set_style_radius(s, 14, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s, lv_color_hex(SCRATCH_BLUE), LV_PART_INDICATOR);
+    // Circular knob: 28+10*2 = 48px diameter (fits 62px content area)
+    lv_obj_set_style_radius(s, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s, 10, LV_PART_KNOB);
+    lv_obj_set_style_bg_color(s, lv_color_hex(SCRATCH_WHITE), LV_PART_KNOB);
+    lv_obj_set_style_border_color(s, lv_color_hex(SCRATCH_BLUE), LV_PART_KNOB);
+    lv_obj_set_style_border_width(s, 3, LV_PART_KNOB);
+    lv_obj_set_style_shadow_color(s, lv_color_hex(0x00000040), LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(s, 4, LV_PART_KNOB);
+    lv_obj_set_style_shadow_ofs_y(s, 2, LV_PART_KNOB);
+    lv_obj_add_style(s, &s_style_widget_focus, LV_STATE_FOCUSED);
+    lv_obj_add_style(s, &s_style_widget_focus, LV_STATE_FOCUS_KEY);
+    lv_obj_add_style(s, &s_style_widget_focus, LV_STATE_EDITED);
 }
 
 static void build_settings()
@@ -737,27 +846,26 @@ static void build_settings()
         // old screen deleted by show_screen auto_del
     }
     lv_group_remove_all_objs(s_group);
+    s_brightness_value_lbl = nullptr;
+    s_volume_value_lbl = nullptr;
 
     s_scr_settings = lv_obj_create(nullptr);
     lv_obj_add_style(s_scr_settings, &s_style_bg, 0);
 
-    // Header
+    // Header — centered title, back button at top-left
     lv_obj_t *title = lv_label_create(s_scr_settings);
-    char title_buf[96];
-    snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_SETTINGS "  %s", tr(STR_SETTINGS_TITLE));
-    lv_label_set_text(title, title_buf);
+    lv_label_set_text(title, tr(STR_SETTINGS_TITLE));
     lv_obj_add_style(title, &s_style_title, 0);
-    lv_obj_set_style_text_font(title, menu_font(24), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_set_style_text_font(title, menu_font(28), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
 
-    // Back button
     lv_obj_t *back_btn = lv_btn_create(s_scr_settings);
     lv_obj_add_style(back_btn, &s_style_btn, 0);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-    lv_obj_set_size(back_btn, 140, 44);
+    lv_obj_set_size(back_btn, 140, 48);
     lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 16);
-    lv_obj_set_style_text_font(back_btn, menu_font(16), 0);
+    lv_obj_set_style_text_font(back_btn, menu_font(18), 0);
     lv_obj_add_event_cb(back_btn, on_settings_back, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
     char back_buf[64];
@@ -766,144 +874,132 @@ static void build_settings()
     lv_obj_center(back_lbl);
     lv_group_add_obj(s_group, back_btn);
 
-    // Content container
+    // Stacked card column (1180 wide, 4 cards x 110 + 3 x 16 gap = 488 high)
     lv_obj_t *cont = lv_obj_create(s_scr_settings);
     lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, lv_pct(80), 500);
-    lv_obj_align(cont, LV_ALIGN_CENTER, 0, 30);
+    lv_obj_set_size(cont, 1180, 504);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 80);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(cont, 20, 0);
+    lv_obj_set_style_pad_row(cont, 16, 0);
 
-    // -- Brightness --
+    // -- Brightness card (slider step 1..10 = 10%..100%) --
     {
-        lv_obj_t *lbl = lv_label_create(cont);
-        lv_label_set_text(lbl, tr(STR_BRIGHTNESS));
-        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
+        lv_obj_t *content = create_settings_card(cont, tr(STR_BRIGHTNESS));
 
-        // Slider row with value label
-        lv_obj_t *slider_row = lv_obj_create(cont);
-        lv_obj_remove_style_all(slider_row);
-        lv_obj_set_width(slider_row, lv_pct(100));
-        lv_obj_set_height(slider_row, 40);
-        lv_obj_set_flex_flow(slider_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(slider_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(slider_row, 16, 0);
-
-        lv_obj_t *slider = lv_slider_create(slider_row);
-        lv_slider_set_range(slider, 1, 10);  // 10 steps: 10% to 100%
-        lv_slider_set_value(slider, s_brightness / 10, LV_ANIM_OFF);
+        lv_obj_t *slider = lv_slider_create(content);
+        style_chunky_slider(slider, 1, BRIGHTNESS_MAX_STEP, s_brightness_step);
         lv_obj_set_flex_grow(slider, 1);
-        lv_obj_set_height(slider, 20);
-        lv_obj_set_style_bg_color(slider, lv_color_hex(0xD9D9D9), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(slider, lv_color_hex(SCRATCH_BLUE), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(slider, lv_color_hex(SCRATCH_WHITE), LV_PART_KNOB);
-        lv_obj_set_style_border_color(slider, lv_color_hex(SCRATCH_BLUE), LV_PART_KNOB);
-        lv_obj_set_style_border_width(slider, 2, LV_PART_KNOB);
-        lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);
-        lv_obj_add_style(slider, &s_style_widget_focus, LV_STATE_FOCUSED);
-        lv_obj_add_style(slider, &s_style_widget_focus, LV_STATE_FOCUS_KEY);
-        lv_obj_add_style(slider, &s_style_widget_focus, LV_STATE_EDITED);
-        lv_obj_add_event_cb(slider, on_brightness_change, LV_EVENT_VALUE_CHANGED, nullptr);
+        lv_obj_add_event_cb(slider, on_brightness_slider, LV_EVENT_VALUE_CHANGED, nullptr);
         lv_group_add_obj(s_group, slider);
 
-        s_brightness_label = lv_label_create(slider_row);
-        lv_label_set_text_fmt(s_brightness_label, "%d%%", s_brightness);
-        lv_obj_set_style_text_font(s_brightness_label, menu_font(18), 0);
-        lv_obj_set_width(s_brightness_label, 60);
+        s_brightness_value_lbl = lv_label_create(content);
+        lv_label_set_text_fmt(s_brightness_value_lbl, "%d%%", STEP_TO_PCT(s_brightness_step));
+        lv_obj_set_style_text_font(s_brightness_value_lbl, menu_font(24), 0);
+        lv_obj_set_style_text_color(s_brightness_value_lbl, lv_color_hex(SCRATCH_TEXT), 0);
+        lv_obj_set_style_text_align(s_brightness_value_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(s_brightness_value_lbl, 110);
     }
 
-    // -- Mute --
+    // -- Volume card (slider 0..10 = 0%..100%, 0 = mute) --
     {
-        lv_obj_t *row = lv_obj_create(cont);
-        lv_obj_remove_style_all(row);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, 50);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *content = create_settings_card(cont, tr(STR_VOLUME));
 
-        lv_obj_t *lbl = lv_label_create(row);
-        lv_label_set_text(lbl, tr(STR_MUTE_AUDIO));
-        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
+        lv_obj_t *slider = lv_slider_create(content);
+        style_chunky_slider(slider, 0, VOLUME_MAX_STEP, s_volume_step);
+        lv_obj_set_flex_grow(slider, 1);
+        lv_obj_add_event_cb(slider, on_volume_slider, LV_EVENT_VALUE_CHANGED, nullptr);
+        lv_group_add_obj(s_group, slider);
 
-        lv_obj_t *sw = lv_switch_create(row);
-        if (s_muted) lv_obj_add_state(sw, LV_STATE_CHECKED);
-        lv_obj_set_style_bg_color(sw, lv_color_hex(SCRATCH_ORANGE), LV_PART_INDICATOR | LV_STATE_CHECKED);
-        lv_obj_add_style(sw, &s_style_widget_focus, LV_STATE_FOCUSED);
-        lv_obj_add_style(sw, &s_style_widget_focus, LV_STATE_FOCUS_KEY);
-        lv_obj_add_event_cb(sw, on_mute_toggle, LV_EVENT_VALUE_CHANGED, nullptr);
-        lv_group_add_obj(s_group, sw);
+        s_volume_value_lbl = lv_label_create(content);
+        lv_label_set_text_fmt(s_volume_value_lbl, "%d%%", STEP_TO_PCT(s_volume_step));
+        lv_obj_set_style_text_font(s_volume_value_lbl, menu_font(24), 0);
+        lv_obj_set_style_text_color(s_volume_value_lbl, lv_color_hex(SCRATCH_TEXT), 0);
+        lv_obj_set_style_text_align(s_volume_value_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(s_volume_value_lbl, 110);
     }
 
-    // -- Language (dropdown) --
+    // -- Language card (chunky dropdown) --
     {
-        lv_obj_t *row = lv_obj_create(cont);
-        lv_obj_remove_style_all(row);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, 50);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *content = create_settings_card(cont, tr(STR_LANGUAGE));
 
-        lv_obj_t *lbl = lv_label_create(row);
-        lv_label_set_text(lbl, tr(STR_LANGUAGE));
-        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
+        // Build options string from LANG_LIST so adding a language doesn't
+        // require touching the UI code.
+        static char dd_opts[256];
+        dd_opts[0] = '\0';
+        for (int i = 0; i < LANG_COUNT; i++) {
+            if (i > 0) strncat(dd_opts, "\n", sizeof(dd_opts) - strlen(dd_opts) - 1);
+            strncat(dd_opts, LANG_LIST[i].display, sizeof(dd_opts) - strlen(dd_opts) - 1);
+        }
 
-        lv_obj_t *dd = lv_dropdown_create(row);
-        lv_dropdown_set_options_static(dd, LANG_DD_TEXT);
+        lv_obj_t *dd = lv_dropdown_create(content);
+        lv_dropdown_set_options_static(dd, dd_opts);
         lv_dropdown_set_selected(dd, lang_to_index(lang_get()));
-        lv_obj_set_size(dd, 220, 44);
-        lv_obj_set_style_text_font(dd, menu_font(18), 0);
-        lv_obj_add_style(dd, &s_style_btn, 0);
-        lv_obj_add_style(dd, &s_style_btn_focus, LV_STATE_FOCUSED);
-        lv_obj_add_style(dd, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_pad_left(dd, 16, 0);
-        lv_obj_set_style_pad_right(dd, 12, 0);
+        lv_obj_set_flex_grow(dd, 1);
+        lv_obj_set_height(dd, 56);
+        lv_font_t *jp = get_jp_font(22);
+        lv_obj_set_style_text_font(dd, jp ? jp : &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(dd, lv_color_hex(SCRATCH_TEXT), 0);
+        lv_obj_set_style_bg_color(dd, lv_color_hex(0xF1F4F9), 0);
+        lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(dd, 16, 0);
+        lv_obj_set_style_border_color(dd, lv_color_hex(0xD9D9D9), 0);
+        lv_obj_set_style_border_width(dd, 2, 0);
+        lv_obj_set_style_pad_left(dd, 20, 0);
+        lv_obj_set_style_pad_right(dd, 16, 0);
+        lv_obj_add_style(dd, &s_style_widget_focus, LV_STATE_FOCUSED);
+        lv_obj_add_style(dd, &s_style_widget_focus, LV_STATE_FOCUS_KEY);
         lv_obj_add_event_cb(dd, on_language_change, LV_EVENT_VALUE_CHANGED, nullptr);
         lv_obj_add_event_cb(dd, on_language_dropdown_open, LV_EVENT_READY, nullptr);
         lv_group_add_obj(s_group, dd);
     }
 
-    // -- Network --
+    // -- Wi-Fi card --
     {
-        lv_obj_t *lbl = lv_label_create(cont);
-        lv_label_set_text(lbl, tr(STR_NETWORK));
-        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
+        lv_obj_t *content = create_settings_card(cont, "Wi-Fi");
 
-        // Show current WiFi status
+        lv_obj_t *icon = lv_label_create(content);
+        lv_label_set_text(icon, LV_SYMBOL_WIFI);
+        lv_obj_set_style_text_font(icon, menu_font(24), 0);
+        lv_obj_set_style_text_color(icon, lv_color_hex(SCRATCH_BLUE), 0);
+
         char saved_ssid[64] = {}, saved_pass[128] = {};
         bool has_wifi = sd_load_wifi(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass));
+        lv_obj_t *ssid = lv_label_create(content);
+        if (has_wifi) lv_label_set_text(ssid, saved_ssid);
+        else          lv_label_set_text(ssid, tr(STR_WIFI_NONE));
+        lv_obj_set_style_text_font(ssid, menu_font(20), 0);
+        lv_obj_set_style_text_color(ssid, lv_color_hex(SCRATCH_TEXT), 0);
+        lv_obj_set_flex_grow(ssid, 1);
+        lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
 
-        lv_obj_t *wifi_info = lv_label_create(cont);
-        if (has_wifi) {
-            lv_label_set_text_fmt(wifi_info, tr(STR_WIFI_SAVED_FMT), saved_ssid);
-        } else {
-            lv_label_set_text(wifi_info, tr(STR_WIFI_NONE));
-        }
-        lv_obj_set_style_text_color(wifi_info, lv_color_hex(0xD9E3F7), 0);
-        lv_obj_set_style_text_font(wifi_info, menu_font(16), 0);
-
-        char wifi_buf[96];
-        snprintf(wifi_buf, sizeof(wifi_buf), LV_SYMBOL_WIFI "  %s", tr(STR_WIFI_SCAN_QR));
-        create_menu_btn(cont, wifi_buf, on_network_qr);
-    }
-
-    // -- Version --
-    {
-        lv_obj_t *ver = lv_label_create(cont);
-        lv_label_set_text(ver, "ScratchESP v0.1.0 | ESP32-P4");
-        lv_obj_set_style_text_color(ver, lv_color_hex(0xB3CDFF), 0);
-        lv_obj_set_style_text_font(ver, menu_font(14), 0);
+        lv_obj_t *qr_btn = lv_btn_create(content);
+        lv_obj_remove_style_all(qr_btn);
+        lv_obj_set_size(qr_btn, 220, 56);
+        lv_obj_set_style_bg_color(qr_btn, lv_color_hex(SCRATCH_ORANGE), 0);
+        lv_obj_set_style_bg_opa(qr_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(qr_btn, 16, 0);
+        lv_obj_set_style_shadow_color(qr_btn, lv_color_hex(SCRATCH_ORANGE_LT), 0);
+        lv_obj_set_style_shadow_width(qr_btn, 6, 0);
+        lv_obj_set_style_shadow_ofs_y(qr_btn, 2, 0);
+        lv_obj_add_style(qr_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
+        lv_obj_add_style(qr_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
+        lv_obj_add_event_cb(qr_btn, on_network_qr, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *qr_lbl = lv_label_create(qr_btn);
+        lv_label_set_text(qr_lbl, tr(STR_WIFI_SCAN_QR));
+        lv_obj_set_style_text_font(qr_lbl, menu_font(20), 0);
+        lv_obj_set_style_text_color(qr_lbl, lv_color_hex(SCRATCH_WHITE), 0);
+        lv_obj_center(qr_lbl);
+        lv_group_add_obj(s_group, qr_btn);
     }
 
     // Footer hint
     lv_obj_t *hint = lv_label_create(s_scr_settings);
-    char hint_buf[160];
-    snprintf(hint_buf, sizeof(hint_buf), LV_SYMBOL_UP LV_SYMBOL_DOWN
-             "  " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT "  %s", tr(STR_SETTINGS_HINT));
-    lv_label_set_text(hint, hint_buf);
+    lv_label_set_text(hint, tr(STR_SETTINGS_HINT));
     lv_obj_set_style_text_color(hint, lv_color_hex(0xB3CDFF), 0);
     lv_obj_set_style_text_font(hint, menu_font(14), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
+
 
 // ============================================================
 // Status / WiFi / Download screens (LVGL-based)
@@ -1192,6 +1288,25 @@ void ui_init(esp_lcd_panel_handle_t panel)
     // Init styles
     init_styles();
 
+    // Load persisted brightness/volume from SD (if present) and apply.
+    // Both are stored as percent (0..100). Convert to internal 10%-step units.
+    {
+        int v;
+        if (sd_load_brightness(&v) && v >= 10 && v <= 100) {
+            s_brightness_step = v / 10;
+            if (s_brightness_step < 1) s_brightness_step = 1;
+            dsi_backlight_set(STEP_TO_PCT(s_brightness_step));
+        } else {
+            dsi_backlight_set(STEP_TO_PCT(s_brightness_step));
+        }
+        if (sd_load_volume(&v) && v >= 0 && v <= 100) {
+            s_volume_step = v / 10;
+            if (s_volume_step > VOLUME_MAX_STEP) s_volume_step = VOLUME_MAX_STEP;
+            s_muted = (s_volume_step == 0);
+        }
+        es8388_set_volume(s_volume_step, VOLUME_MAX_STEP);
+    }
+
     // Input device (gamepad as keypad)
     s_indev = lv_indev_create();
     lv_indev_set_type(s_indev, LV_INDEV_TYPE_KEYPAD);
@@ -1274,11 +1389,24 @@ MenuAction ui_menu_run()
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
 
-            // Back to menu
-            s_state = MenuState::MAIN_MENU;
+            // Drain any held B/Back/Start so the menu loop's edge-detector
+            // doesn't see the QR-exit press as a fresh "back to main menu".
+            while (InputDev::get().buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+
+            // Return to whichever screen launched the QR scan.
             xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-            build_main_menu();
-            show_screen(s_scr_main);
+            if (s_qr_wifi_from_settings) {
+                s_qr_wifi_from_settings = false;
+                build_settings();
+                show_screen(s_scr_settings);
+                s_state = MenuState::SETTINGS;
+            } else {
+                build_main_menu();
+                show_screen(s_scr_main);
+                s_state = MenuState::MAIN_MENU;
+            }
             xSemaphoreGive(s_lvgl_mutex);
             continue;
         }
@@ -1335,6 +1463,12 @@ MenuAction ui_menu_run()
                 s_action = MenuAction::PLAY_FROM_QR;
                 s_state = MenuState::DOWNLOADING;
                 break;
+            }
+
+            // Drain any held B/Back/Start so the menu loop's edge-detector
+            // doesn't fire on the just-released QR-exit press.
+            while (InputDev::get().buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
 
             // Back to menu

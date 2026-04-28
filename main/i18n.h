@@ -25,6 +25,9 @@ enum StringId {
     STR_SETTINGS_TITLE,
     STR_BRIGHTNESS,
     STR_MUTE_AUDIO,
+    STR_VOLUME,
+    STR_LEVEL_LOW,              // "small"  / "ちいさい"
+    STR_LEVEL_HIGH,             // "big"    / "おおきい"
     STR_LANGUAGE,
     STR_NETWORK,
     STR_WIFI_SAVED_FMT,         // "Saved: %s"

@@ -20,6 +20,14 @@ void sd_save_lang(const char *code);
 // Returns true if a value was loaded.
 bool sd_load_lang(char *code, int code_size);
 
+// Save/load display brightness (0-100).
+void sd_save_brightness(int pct);
+bool sd_load_brightness(int *pct);
+
+// Save/load audio volume level (0=mute, 1-5).
+void sd_save_volume(int level);
+bool sd_load_volume(int *level);
+
 // ============================================================
 // Game storage: /sd/games/<project_id>/
 // ============================================================

@@ -16,6 +16,8 @@ static const char *TAG = "sd";
 static const char *MOUNT_POINT = "/sd";
 static const char *WIFI_FILE = "/sd/wifi.txt";
 static const char *LANG_FILE = "/sd/lang.txt";
+static const char *BRIGHTNESS_FILE = "/sd/brightness.txt";
+static const char *VOLUME_FILE = "/sd/volume.txt";
 static bool s_mounted = false;
 
 bool sd_init()
@@ -132,6 +134,38 @@ bool sd_load_lang(char *code, int code_size)
     fclose(f);
     return code[0] != '\0';
 }
+
+static void save_int_file(const char *path, int v, const char *label)
+{
+    if (!s_mounted) return;
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", path);
+        return;
+    }
+    fprintf(f, "%d\n", v);
+    fclose(f);
+    ESP_LOGI(TAG, "%s saved: %d", label, v);
+}
+
+static bool load_int_file(const char *path, int *out)
+{
+    if (!s_mounted || !out) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char buf[16] = {};
+    bool ok = false;
+    if (fgets(buf, sizeof(buf), f)) {
+        ok = sscanf(buf, "%d", out) == 1;
+    }
+    fclose(f);
+    return ok;
+}
+
+void sd_save_brightness(int pct) { save_int_file(BRIGHTNESS_FILE, pct, "Brightness"); }
+bool sd_load_brightness(int *pct) { return load_int_file(BRIGHTNESS_FILE, pct); }
+void sd_save_volume(int level)   { save_int_file(VOLUME_FILE, level, "Volume"); }
+bool sd_load_volume(int *level)  { return load_int_file(VOLUME_FILE, level); }
 
 // ============================================================
 // Game storage

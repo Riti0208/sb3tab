@@ -9,3 +9,7 @@ void es8388_test_tone_22k();
 
 // Set mute state (true = muted)
 void es8388_set_mute(bool mute);
+
+// Set volume level. level=0 → mute, level=1..max_level → mapped to DAC digital
+// volume from quietest to 0dB. Default max_level=5 (kid-friendly stepper).
+void es8388_set_volume(int level, int max_level = 5);

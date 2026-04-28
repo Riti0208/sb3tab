@@ -212,3 +212,26 @@ void es8388_set_mute(bool mute)
     es_write_reg(ES_DACCONTROL3, mute ? 0x24 : 0x00);
     ESP_LOGI(TAG, "Mute: %s", mute ? "ON" : "OFF");
 }
+
+void es8388_set_volume(int level, int max_level)
+{
+    if (!s_es8388_dev) return;
+    if (max_level < 1) max_level = 1;
+    if (level < 0) level = 0;
+    if (level > max_level) level = max_level;
+
+    if (level == 0) {
+        es8388_set_mute(true);
+        return;
+    }
+
+    // Unmute and map level → DAC digital attenuation (DACCONTROL4/5).
+    // 0x00=0dB (loudest), 0xC0=-96dB. Step is 0.5dB. We map level linearly
+    // across [-32dB, 0dB]: highest level → 0x00, lowest non-zero level → 0x40.
+    es_write_reg(ES_DACCONTROL3, 0x00);
+    int denom = (max_level > 1) ? (max_level - 1) : 1;
+    uint8_t atten = (uint8_t)((max_level - level) * 0x40 / denom);
+    es_write_reg(ES_DACCONTROL4, atten);
+    es_write_reg(ES_DACCONTROL5, atten);
+    ESP_LOGI(TAG, "Volume: %d/%d (atten=0x%02X)", level, max_level, atten);
+}
