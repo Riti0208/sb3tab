@@ -26,6 +26,14 @@ Timer BlockExecutor::timer;
 int BlockExecutor::dragPositionOffsetX;
 int BlockExecutor::dragPositionOffsetY;
 
+// Check if a hat block's script is already running (has pending repeat blocks).
+// If running, skip execution. This matches Scratch 3.0 behavior where
+// hat blocks ignore re-triggers while their script is active.
+static bool isScriptRunning(Sprite *sprite, Block &block) {
+    auto chainIt = sprite->blockChains.find(block.blockChainID);
+    return chainIt != sprite->blockChains.end() && !chainIt->second.blocksToRepeat.empty();
+}
+
 std::unordered_map<std::string, BlockHandlerPtr> &BlockExecutor::getHandlers() {
     static std::unordered_map<std::string, BlockHandlerPtr> handlers;
     return handlers;
@@ -202,10 +210,7 @@ void BlockExecutor::executeKeyHats() {
             if (data.opcode == "event_whenkeypressed") {
                 std::string key = Scratch::getFieldValue(data, "KEY_OPTION");
                 if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && Input::keyHeldDuration.find(key)->second == 1) {
-                    // Restart: clear existing repeat queue for this script before re-running
-                    auto chainIt = currentSprite->blockChains.find(data.blockChainID);
-                    if (chainIt != currentSprite->blockChains.end())
-                        chainIt->second.blocksToRepeat.clear();
+                    if (isScriptRunning(currentSprite, data)) continue;
                     executor.runBlock(data, currentSprite);
                 }
             } else if (data.opcode == "makeymakey_whenMakeyKeyPressed") {
@@ -233,7 +238,8 @@ void BlockExecutor::doSpriteClicking() {
                     hasClicked = true;
                     for (auto &data : sprite->blocks) {
                         if (data.opcode == "event_whenthisspriteclicked" || data.opcode == "event_whenstageclicked") {
-                            executor.runBlock(data, sprite);
+                            if (!isScriptRunning(sprite, data))
+                                executor.runBlock(data, sprite);
                         }
                     }
                 }
@@ -438,7 +444,8 @@ void BlockExecutor::runBroadcast(std::string broadcastToRun) {
                 std::string fieldValue = Scratch::getFieldValue(block, "BROADCAST_OPTION");
                 std::transform(fieldValue.begin(), fieldValue.end(), fieldValue.begin(), ::tolower);
                 if (fieldValue == broadcastToRun) {
-                    executor.runBlock(block, currentSprite);
+                    if (!isScriptRunning(currentSprite, block))
+                        executor.runBlock(block, currentSprite);
                 }
             }
         }
@@ -459,7 +466,8 @@ void BlockExecutor::runBackdrop(std::string backdropToRun) {
         for (auto &block : currentSprite->blocks) {
             if (block.opcode == "event_whenbackdropswitchesto" &&
                 Scratch::getFieldValue(block, "BACKDROP") == backdropToRun) {
-                executor.runBlock(block, currentSprite);
+                if (!isScriptRunning(currentSprite, block))
+                    executor.runBlock(block, currentSprite);
             }
         }
     }
@@ -471,7 +479,7 @@ void BlockExecutor::runAllBlocksByOpcode(std::string opcodeToFind) {
     for (Sprite *currentSprite : sprToRun) {
         for (auto &data : currentSprite->blocks) {
             if (data.opcode != opcodeToFind) continue;
-
+            if (isScriptRunning(currentSprite, data)) continue;
             executor.runBlock(data, currentSprite);
         }
     }

@@ -14,6 +14,7 @@
 #include "esp_task_wdt.h"
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "driver/gpio.h"
 #include "soc/io_mux_reg.h"
 #include "soc/gpio_reg.h"
@@ -996,6 +997,16 @@ extern "C" void app_main(void)
         ui_show_status("Starting!", nullptr);
         vTaskDelay(pdMS_TO_TICKS(500));
         ui_suspend();
+
+        // Clear DPI framebuffer to black (remove LVGL UI residue)
+        {
+            void *fb0 = nullptr;
+            if (esp_lcd_dpi_panel_get_frame_buffer(dsi_panel, 1, &fb0) == ESP_OK && fb0) {
+                memset(fb0, 0, DSI_LCD_W * DSI_LCD_H * 2);
+                esp_cache_msync(fb0, DSI_LCD_W * DSI_LCD_H * 2,
+                                ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+            }
+        }
 
         if (load_and_run()) {
             // Game loop: check for Start/Select overlays
