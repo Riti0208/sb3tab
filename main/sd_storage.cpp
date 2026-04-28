@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
@@ -14,6 +15,7 @@
 static const char *TAG = "sd";
 static const char *MOUNT_POINT = "/sd";
 static const char *WIFI_FILE = "/sd/wifi.txt";
+static const char *LANG_FILE = "/sd/lang.txt";
 static bool s_mounted = false;
 
 bool sd_init()
@@ -103,6 +105,34 @@ bool sd_load_wifi(char *ssid, int ssid_size, char *password, int password_size)
     return true;
 }
 
+void sd_save_lang(const char *code)
+{
+    if (!s_mounted || !code) return;
+    FILE *f = fopen(LANG_FILE, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", LANG_FILE);
+        return;
+    }
+    fprintf(f, "%s\n", code);
+    fclose(f);
+    ESP_LOGI(TAG, "Language saved: %s", code);
+}
+
+bool sd_load_lang(char *code, int code_size)
+{
+    if (!s_mounted || code_size < 1) return false;
+    FILE *f = fopen(LANG_FILE, "r");
+    if (!f) return false;
+
+    code[0] = '\0';
+    if (fgets(code, code_size, f)) {
+        char *nl = strchr(code, '\n');
+        if (nl) *nl = '\0';
+    }
+    fclose(f);
+    return code[0] != '\0';
+}
+
 // ============================================================
 // Game storage
 // ============================================================
@@ -166,20 +196,32 @@ void sd_save_game(const char *project_id, const char *name,
                   const char *project_json, size_t json_len,
                   const SdAsset *assets, int asset_count)
 {
-    if (!s_mounted) return;
+    if (!s_mounted) {
+        ESP_LOGE(TAG, "save_game: SD not mounted");
+        return;
+    }
     ensure_games_dir();
 
     char dir[280];
     snprintf(dir, sizeof(dir), "%s/%s", GAMES_DIR, project_id);
-    mkdir(dir, 0755);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "save_game: mkdir(%s) failed: %s", dir, strerror(errno));
+        return;
+    }
 
     // Save project.json
     char path[320];
     snprintf(path, sizeof(path), "%s/project.json", dir);
     FILE *f = fopen(path, "w");
-    if (f) {
-        fwrite(project_json, 1, json_len, f);
-        fclose(f);
+    if (!f) {
+        ESP_LOGE(TAG, "save_game: fopen(%s) failed: %s", path, strerror(errno));
+        return;
+    }
+    size_t written = fwrite(project_json, 1, json_len, f);
+    fclose(f);
+    if (written != json_len) {
+        ESP_LOGE(TAG, "save_game: short write on project.json (%zu/%zu)", written, json_len);
+        return;
     }
 
     // Save name
@@ -192,18 +234,29 @@ void sd_save_game(const char *project_id, const char *name,
     // Save assets
     char assets_dir[300];
     snprintf(assets_dir, sizeof(assets_dir), "%s/assets", dir);
-    mkdir(assets_dir, 0755);
+    if (mkdir(assets_dir, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "save_game: mkdir(%s) failed: %s", assets_dir, strerror(errno));
+        return;
+    }
 
+    int saved = 0;
     for (int i = 0; i < asset_count; i++) {
         snprintf(path, sizeof(path), "%s/%s", assets_dir, assets[i].name);
         f = fopen(path, "wb");
-        if (f) {
-            fwrite(assets[i].data, 1, assets[i].len, f);
-            fclose(f);
+        if (!f) {
+            ESP_LOGE(TAG, "save_game: fopen(%s) failed: %s", path, strerror(errno));
+            continue;
+        }
+        size_t w = fwrite(assets[i].data, 1, assets[i].len, f);
+        fclose(f);
+        if (w != assets[i].len) {
+            ESP_LOGE(TAG, "save_game: short write on %s (%zu/%zu)", assets[i].name, w, assets[i].len);
+        } else {
+            saved++;
         }
     }
 
-    ESP_LOGI(TAG, "Game saved: %s (%d assets)", project_id, asset_count);
+    ESP_LOGI(TAG, "Game saved: %s (%d/%d assets)", project_id, saved, asset_count);
 }
 
 char *sd_load_game(const char *project_id, size_t *json_len,

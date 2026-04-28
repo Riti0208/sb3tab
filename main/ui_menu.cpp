@@ -9,6 +9,7 @@
 #include "wifi_manager.h"
 #include "camera_qr.h"
 #include "es8388_audio.h"
+#include "i18n.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,11 +22,58 @@
 #include "driver/ppa.h"
 
 #include "lvgl.h"
+#include "src/libs/tiny_ttf/lv_tiny_ttf.h"
 
 #include <cstring>
 #include <cstdio>
 #include <vector>
 #include <string>
+
+// Embedded NotoSansJP TTF (linked via EMBED_FILES in scratch_core)
+extern "C" const uint8_t noto_sans_ttf_start[] asm("_binary_NotoSansJP_Medium_subset_ttf_start");
+extern "C" const uint8_t noto_sans_ttf_end[]   asm("_binary_NotoSansJP_Medium_subset_ttf_end");
+
+// Pick the closest pre-baked Montserrat font for a desired pixel size.
+// Used as a fallback for the JP TTF (NotoSansJP subset doesn't include LV_SYMBOL_*
+// FontAwesome glyphs) and as the primary font in EN mode.
+static const lv_font_t *montserrat_for(int px) {
+    if (px <= 14) return &lv_font_montserrat_14;
+    if (px <= 16) return &lv_font_montserrat_16;
+    if (px <= 18) return &lv_font_montserrat_18;
+    if (px <= 20) return &lv_font_montserrat_20;
+    if (px <= 24) return &lv_font_montserrat_24;
+    return &lv_font_montserrat_36;
+}
+
+// Cache up to a handful of JP font sizes so multiple labels can coexist.
+struct JpFontEntry { int px; lv_font_t *font; };
+static JpFontEntry s_jp_cache[8] = {};
+
+static lv_font_t *get_jp_font(int px) {
+    for (auto &e : s_jp_cache) {
+        if (e.font && e.px == px) return e.font;
+    }
+    size_t len = (size_t)(noto_sans_ttf_end - noto_sans_ttf_start);
+    lv_font_t *f = lv_tiny_ttf_create_data(noto_sans_ttf_start, len, px);
+    if (!f) return nullptr;
+    // Chain Montserrat as fallback for missing glyphs (LV_SYMBOL_*, etc).
+    f->fallback = montserrat_for(px);
+    for (auto &e : s_jp_cache) {
+        if (!e.font) { e.px = px; e.font = f; return f; }
+    }
+    // Cache full — return the font but it leaks if we keep recreating.
+    return f;
+}
+
+// Pick the menu font for a desired pixel size based on the current language.
+// EN: pre-baked Montserrat (fast, polished). JP: NotoSansJP TTF + Montserrat fallback.
+static const lv_font_t *menu_font(int px) {
+    if (lang_get() == Lang::JP) {
+        lv_font_t *f = get_jp_font(px);
+        if (f) return f;
+    }
+    return montserrat_for(px);
+}
 
 static const char *TAG = "ui_menu";
 
@@ -159,7 +207,9 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->state = LV_INDEV_STATE_RELEASED;
     data->key = 0;
 
-    // D-pad UP/DOWN → navigate, LEFT/RIGHT → adjust value (sliders etc.)
+    // D-pad UP/DOWN → navigate. LEFT/RIGHT → adjust in edit mode (sliders),
+    // otherwise also navigate (so horizontal Yes/No is reachable with the d-pad).
+    bool editing = s_group && lv_group_get_editing(s_group);
     if (b & XBOX_DPAD_UP) {
         data->key = LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
@@ -167,10 +217,10 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->key = LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & XBOX_DPAD_LEFT) {
-        data->key = LV_KEY_LEFT;
+        data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & XBOX_DPAD_RIGHT) {
-        data->key = LV_KEY_RIGHT;
+        data->key = editing ? LV_KEY_RIGHT : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & XBOX_A) {
         data->key = LV_KEY_ENTER;
@@ -194,9 +244,11 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         } else if (gs.ly < -DZ) {
             data->key = LV_KEY_NEXT; data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.lx < -DZ) {
-            data->key = LV_KEY_LEFT; data->state = LV_INDEV_STATE_PRESSED;
+            data->key = editing ? LV_KEY_LEFT : LV_KEY_PREV;
+            data->state = LV_INDEV_STATE_PRESSED;
         } else if (gs.lx > DZ) {
-            data->key = LV_KEY_RIGHT; data->state = LV_INDEV_STATE_PRESSED;
+            data->key = editing ? LV_KEY_RIGHT : LV_KEY_NEXT;
+            data->state = LV_INDEV_STATE_PRESSED;
         }
     }
 }
@@ -314,7 +366,7 @@ static lv_obj_t *create_menu_btn(lv_obj_t *parent, const char *text, lv_event_cb
     lv_obj_add_style(btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
     lv_obj_set_width(btn, lv_pct(80));
     lv_obj_set_height(btn, 64);
-    lv_obj_set_style_text_font(btn, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(btn, menu_font(20), 0);
     if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
 
     lv_obj_t *label = lv_label_create(btn);
@@ -369,17 +421,17 @@ static void build_main_menu()
     s_scr_main = lv_obj_create(nullptr);
     lv_obj_add_style(s_scr_main, &s_style_bg, 0);
 
-    // Title
+    // Title (brand name — kept as-is)
     lv_obj_t *title = lv_label_create(s_scr_main);
     lv_label_set_text(title, "ScratchESP");
     lv_obj_add_style(title, &s_style_title, 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_36, 0);
+    lv_obj_set_style_text_font(title, menu_font(36), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
 
     lv_obj_t *subtitle = lv_label_create(s_scr_main);
-    lv_label_set_text(subtitle, "Scratch on ESP32-P4");
+    lv_label_set_text(subtitle, tr(STR_SUBTITLE));
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0xD9E3F7), 0);
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(subtitle, menu_font(16), 0);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 90);
 
     // Menu buttons container
@@ -391,17 +443,22 @@ static void build_main_menu()
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(cont, 16, 0);
 
-    create_menu_btn(cont, LV_SYMBOL_LIST "  Games", on_games_click);
-    create_menu_btn(cont, LV_SYMBOL_DOWNLOAD "  New Game (QR)", on_new_game_click);
-    create_menu_btn(cont, LV_SYMBOL_SETTINGS "  Settings", on_settings_click);
+    char buf[96];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_LIST "  %s", tr(STR_MAIN_GAMES));
+    create_menu_btn(cont, buf, on_games_click);
+    snprintf(buf, sizeof(buf), LV_SYMBOL_DOWNLOAD "  %s", tr(STR_MAIN_NEW_GAME));
+    create_menu_btn(cont, buf, on_new_game_click);
+    snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS "  %s", tr(STR_MAIN_SETTINGS));
+    create_menu_btn(cont, buf, on_settings_click);
 
     // Footer: gamepad status
     lv_obj_t *footer = lv_label_create(s_scr_main);
     lv_obj_set_style_text_color(footer, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(footer, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(footer, menu_font(14), 0);
     lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_label_set_text_fmt(footer, "A: Select  B: Back  %s",
-                          gamepad_connected() ? LV_SYMBOL_OK " Gamepad" : LV_SYMBOL_CLOSE " No Gamepad");
+    lv_label_set_text_fmt(footer, "%s  %s%s", tr(STR_FOOTER_HINT),
+                          gamepad_connected() ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+                          gamepad_connected() ? tr(STR_GAMEPAD_OK) : tr(STR_GAMEPAD_NONE));
 }
 
 // ============================================================
@@ -414,16 +471,6 @@ static void on_game_play(lv_event_t *e) {
         snprintf(s_selected_project_id, sizeof(s_selected_project_id), "%s", pid);
         s_action = MenuAction::PLAY_FROM_SD;
         s_state = MenuState::PLAYING;
-    }
-}
-
-static void on_game_delete(lv_event_t *e) {
-    const char *pid = (const char *)lv_event_get_user_data(e);
-    if (pid) {
-        sd_delete_game(pid);
-        // Rebuild list
-        build_game_list();
-        show_screen(s_scr_games);
     }
 }
 
@@ -445,9 +492,11 @@ static void build_game_list()
 
     // Header
     lv_obj_t *title = lv_label_create(s_scr_games);
-    lv_label_set_text(title, LV_SYMBOL_LIST "  Saved Games");
+    char title_buf[96];
+    snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_LIST "  %s", tr(STR_GAMES_TITLE));
+    lv_label_set_text(title, title_buf);
     lv_obj_add_style(title, &s_style_title, 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title, menu_font(24), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
     // Back button
@@ -455,24 +504,28 @@ static void build_game_list()
     lv_obj_add_style(back_btn, &s_style_btn, 0);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-    lv_obj_set_size(back_btn, 120, 44);
+    lv_obj_set_size(back_btn, 140, 44);
     lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 16);
+    lv_obj_set_style_text_font(back_btn, menu_font(16), 0);
     lv_obj_add_event_cb(back_btn, on_game_list_back, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " Back");
+    char back_buf[64];
+    snprintf(back_buf, sizeof(back_buf), LV_SYMBOL_LEFT " %s", tr(STR_BACK));
+    lv_label_set_text(back_lbl, back_buf);
     lv_obj_center(back_lbl);
     lv_group_add_obj(s_group, back_btn);
 
-    // Game list
-    SdGameList games;
+    // Game list — keep static so project_id pointers stored as user_data
+    // remain valid after build_game_list returns.
+    static SdGameList games;
     sd_list_games(&games);
 
     if (games.count == 0) {
         lv_obj_t *empty = lv_label_create(s_scr_games);
-        lv_label_set_text(empty, "No saved games.\nUse \"New Game\" to download one.");
+        lv_label_set_text(empty, tr(STR_GAMES_EMPTY));
         lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E3F7), 0);
-        lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_font(empty, menu_font(18), 0);
         lv_obj_align(empty, LV_ALIGN_CENTER, 0, 0);
         return;
     }
@@ -496,23 +549,25 @@ static void build_game_list()
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        // Game name/ID
+        // Game name/ID (use JP-capable font so Japanese titles render)
         lv_obj_t *name = lv_label_create(row);
         lv_label_set_text(name, games.entries[i].name[0] ? games.entries[i].name : games.entries[i].project_id);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
+        lv_font_t *jp = get_jp_font(20);
+        lv_obj_set_style_text_font(name, jp ? jp : &lv_font_montserrat_18, 0);
         lv_label_set_long_mode(name, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_set_width(name, 700);
 
-        // Store project_id pointer (static array in SdGameList)
+        // Store project_id pointer (static SdGameList — pointer stays valid)
+        lv_obj_set_user_data(row, (void *)games.entries[i].project_id);
         lv_obj_add_event_cb(row, on_game_play, LV_EVENT_CLICKED, (void *)games.entries[i].project_id);
         lv_group_add_obj(s_group, row);
     }
 
     // Footer hint
     lv_obj_t *hint = lv_label_create(s_scr_games);
-    lv_label_set_text(hint, "A: Play  B: Back");
+    lv_label_set_text(hint, tr(STR_GAMES_HINT));
     lv_obj_set_style_text_color(hint, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(hint, menu_font(14), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
 
@@ -548,6 +603,13 @@ static void on_settings_back(lv_event_t *e) {
     s_state = MenuState::MAIN_MENU;
 }
 
+static void on_language_toggle(lv_event_t *e) {
+    lang_set(lang_get() == Lang::JP ? Lang::EN : Lang::JP);
+    // Rebuild Settings so all labels redraw in the new language.
+    build_settings();
+    show_screen(s_scr_settings);
+}
+
 static void build_settings()
 {
     if (s_scr_settings) {
@@ -560,9 +622,11 @@ static void build_settings()
 
     // Header
     lv_obj_t *title = lv_label_create(s_scr_settings);
-    lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Settings");
+    char title_buf[96];
+    snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_SETTINGS "  %s", tr(STR_SETTINGS_TITLE));
+    lv_label_set_text(title, title_buf);
     lv_obj_add_style(title, &s_style_title, 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title, menu_font(24), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
     // Back button
@@ -570,27 +634,30 @@ static void build_settings()
     lv_obj_add_style(back_btn, &s_style_btn, 0);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
-    lv_obj_set_size(back_btn, 120, 44);
+    lv_obj_set_size(back_btn, 140, 44);
     lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 16);
+    lv_obj_set_style_text_font(back_btn, menu_font(16), 0);
     lv_obj_add_event_cb(back_btn, on_settings_back, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " Back");
+    char back_buf[64];
+    snprintf(back_buf, sizeof(back_buf), LV_SYMBOL_LEFT " %s", tr(STR_BACK));
+    lv_label_set_text(back_lbl, back_buf);
     lv_obj_center(back_lbl);
     lv_group_add_obj(s_group, back_btn);
 
     // Content container
     lv_obj_t *cont = lv_obj_create(s_scr_settings);
     lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, lv_pct(80), 450);
+    lv_obj_set_size(cont, lv_pct(80), 500);
     lv_obj_align(cont, LV_ALIGN_CENTER, 0, 30);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(cont, 24, 0);
+    lv_obj_set_style_pad_row(cont, 20, 0);
 
     // -- Brightness --
     {
         lv_obj_t *lbl = lv_label_create(cont);
-        lv_label_set_text(lbl, "Brightness");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_label_set_text(lbl, tr(STR_BRIGHTNESS));
+        lv_obj_set_style_text_font(lbl, menu_font(18), 0);
 
         // Slider row with value label
         lv_obj_t *slider_row = lv_obj_create(cont);
@@ -764,6 +831,74 @@ static void build_status_screen(const char *title, const char *detail, bool show
 // Confirm dialog screen with A/B buttons
 static volatile int s_confirm_result = -1; // -1=pending, 0=no, 1=yes
 
+// In-game overlay support: capture current DPI FB, rotate to landscape, darken,
+// then use as a full-screen background image so the game shows through.
+static uint8_t *s_overlay_buf = nullptr;
+static lv_image_dsc_t s_overlay_dsc;
+static bool s_confirm_overlay = false;
+
+static void capture_game_to_overlay()
+{
+    if (!s_overlay_buf) {
+        s_overlay_buf = (uint8_t *)heap_caps_aligned_alloc(64, LVGL_BUF_SIZE,
+                            MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+        if (!s_overlay_buf) return;
+    }
+
+    void *dpi_fb = nullptr;
+    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &dpi_fb) != ESP_OK || !dpi_fb) return;
+
+    // PPA SRM: rotate 90° (portrait 720x1280 → landscape 1280x720)
+    xSemaphoreTake(s_lvgl_ppa_done, pdMS_TO_TICKS(100));
+    ppa_srm_oper_config_t srm = {};
+    srm.in.buffer = dpi_fb;
+    srm.in.pic_w = DSI_LCD_W;
+    srm.in.pic_h = DSI_LCD_H;
+    srm.in.block_w = DSI_LCD_W;
+    srm.in.block_h = DSI_LCD_H;
+    srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    srm.out.buffer = s_overlay_buf;
+    srm.out.buffer_size = LVGL_BUF_SIZE;
+    srm.out.pic_w = LVGL_BUF_W;
+    srm.out.pic_h = LVGL_BUF_H;
+    srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
+    srm.scale_x = 1.0f;
+    srm.scale_y = 1.0f;
+    srm.alpha_update_mode = PPA_ALPHA_NO_CHANGE;
+    srm.mode = PPA_TRANS_MODE_BLOCKING;
+    esp_err_t ppa_ret = ppa_do_scale_rotate_mirror(s_lvgl_ppa, &srm);
+    xSemaphoreGive(s_lvgl_ppa_done);
+    if (ppa_ret != ESP_OK) {
+        ESP_LOGE(TAG, "overlay PPA failed: %s", esp_err_to_name(ppa_ret));
+        return;
+    }
+
+    // PPA wrote directly to PSRAM bypassing CPU cache → invalidate cache
+    // before CPU reads, otherwise stale data is seen.
+    esp_cache_msync(s_overlay_buf, LVGL_BUF_SIZE,
+                    ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+
+    // Darken: ~25% brightness, RGB565
+    uint16_t *p = (uint16_t *)s_overlay_buf;
+    int n = LVGL_BUF_W * LVGL_BUF_H;
+    for (int i = 0; i < n; i++) {
+        uint16_t v = p[i];
+        uint16_t r = ((v >> 11) & 0x1F) >> 2;
+        uint16_t g = ((v >> 5)  & 0x3F) >> 2;
+        uint16_t b = ( v        & 0x1F) >> 2;
+        p[i] = (uint16_t)((r << 11) | (g << 5) | b);
+    }
+    esp_cache_msync(s_overlay_buf, LVGL_BUF_SIZE,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+
+    s_overlay_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_overlay_dsc.header.w = LVGL_BUF_W;
+    s_overlay_dsc.header.h = LVGL_BUF_H;
+    s_overlay_dsc.data_size = LVGL_BUF_SIZE;
+    s_overlay_dsc.data = s_overlay_buf;
+}
+
 static void on_confirm_yes(lv_event_t *e) { s_confirm_result = 1; }
 static void on_confirm_no(lv_event_t *e) { s_confirm_result = 0; }
 
@@ -773,7 +908,16 @@ static void build_confirm_screen(const char *title, const char *detail)
     lv_group_remove_all_objs(s_group);
 
     s_scr_status = lv_obj_create(nullptr);
-    lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+    if (s_confirm_overlay && s_overlay_buf) {
+        // Bg = darkened captured game frame
+        lv_obj_set_style_bg_opa(s_scr_status, LV_OPA_TRANSP, 0);
+        lv_obj_t *img = lv_image_create(s_scr_status);
+        lv_image_set_src(img, &s_overlay_dsc);
+        lv_obj_align(img, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+    }
 
     lv_obj_t *box = lv_obj_create(s_scr_status);
     lv_obj_remove_style_all(box);
@@ -806,14 +950,12 @@ static void build_confirm_screen(const char *title, const char *detail)
     lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(btn_row, 24, 0);
 
-    // Yes button
+    // Yes button (default style; focus style highlights it when selected)
     lv_obj_t *btn_yes = lv_btn_create(btn_row);
     lv_obj_add_style(btn_yes, &s_style_btn, 0);
     lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(btn_yes, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
     lv_obj_set_size(btn_yes, 160, 48);
-    lv_obj_set_style_bg_color(btn_yes, lv_color_hex(SCRATCH_ORANGE), 0);
-    lv_obj_set_style_text_color(btn_yes, lv_color_hex(SCRATCH_WHITE), 0);
     lv_obj_add_event_cb(btn_yes, on_confirm_yes, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *lbl_yes = lv_label_create(btn_yes);
     lv_label_set_text(lbl_yes, LV_SYMBOL_OK "  Yes");
@@ -1048,6 +1190,49 @@ MenuAction ui_menu_run()
             break;
         }
 
+        // Global B = back (one screen up). Confirm/QR screens handle B themselves.
+        {
+            static bool s_b_prev = false;
+            bool b_now = (gamepad_get_state().buttons & XBOX_B) != 0;
+            if (b_now && !s_b_prev) {
+                if (s_state == MenuState::GAME_LIST || s_state == MenuState::SETTINGS) {
+                    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+                    build_main_menu();
+                    show_screen(s_scr_main);
+                    xSemaphoreGive(s_lvgl_mutex);
+                    s_state = MenuState::MAIN_MENU;
+                    while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
+                }
+            }
+            s_b_prev = b_now;
+        }
+
+        // Edge-detect X press in game list → delete focused entry
+        if (s_state == MenuState::GAME_LIST) {
+            static bool s_x_prev = false;
+            bool x_now = (gamepad_get_state().buttons & XBOX_X) != 0;
+            if (x_now && !s_x_prev) {
+                xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+                lv_obj_t *focused = lv_group_get_focused(s_group);
+                const char *pid = focused ? (const char *)lv_obj_get_user_data(focused) : nullptr;
+                xSemaphoreGive(s_lvgl_mutex);
+                if (pid && pid[0]) {
+                    char detail[128];
+                    snprintf(detail, sizeof(detail), "Delete \"%s\"?", pid);
+                    if (ui_show_confirm("Confirm", detail)) {
+                        sd_delete_game(pid);
+                    }
+                    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+                    build_game_list();
+                    show_screen(s_scr_games);
+                    xSemaphoreGive(s_lvgl_mutex);
+                    // Wait for X release before continuing
+                    while (gamepad_get_state().buttons & XBOX_X) vTaskDelay(pdMS_TO_TICKS(20));
+                }
+            }
+            s_x_prev = x_now;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
@@ -1075,22 +1260,16 @@ void ui_resume()
 
 bool ui_show_exit_confirm()
 {
-    // Simple blocking confirm using gamepad polling
-    // (Called from game context, LVGL is suspended)
-    dsi_modal_show(s_panel, "Return to Menu?", "A: Yes  B: No");
-
-    while (true) {
-        GamepadState gs = gamepad_get_state();
-        if (gs.buttons & XBOX_A) {
-            while (gamepad_get_state().buttons & XBOX_A) vTaskDelay(pdMS_TO_TICKS(20));
-            return true;
-        }
-        if (gs.buttons & XBOX_B) {
-            while (gamepad_get_state().buttons & XBOX_B) vTaskDelay(pdMS_TO_TICKS(20));
-            return false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
+    // Reuse the same LVGL confirm dialog as the menu, but show the (darkened)
+    // current game frame as the background so it looks like an overlay.
+    bool was_disabled = s_flush_disabled;
+    capture_game_to_overlay();
+    s_confirm_overlay = true;
+    s_flush_disabled = false;
+    bool result = ui_show_confirm("Return to Menu?", nullptr);
+    s_confirm_overlay = false;
+    s_flush_disabled = was_disabled;
+    return result;
 }
 
 void ui_show_button_map()

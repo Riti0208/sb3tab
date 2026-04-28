@@ -136,6 +136,7 @@ static bool usb_ll_read_line(char *buf, int max_len, int timeout_ms) {
 // ============================================================
 
 static nlohmann::json *g_project_json = nullptr;
+static std::string g_project_title;
 
 struct AssetEntry {
     std::string name;
@@ -755,6 +756,10 @@ static bool qr_download_project(const char *project_id)
     if (api_json.contains("project_token")) {
         token = api_json["project_token"].get<std::string>();
     }
+    g_project_title.clear();
+    if (api_json.contains("title") && api_json["title"].is_string()) {
+        g_project_title = api_json["title"].get<std::string>();
+    }
 
     // Step 2: Download project.json
     ui_download_update("Loading JSON...", 0, 0);
@@ -899,7 +904,11 @@ static bool load_game_from_sd(const char *project_id)
 
 static void save_current_project_to_sd(const char *project_id)
 {
-    if (!g_project_json || g_assets.empty()) return;
+    if (!g_project_json || g_assets.empty()) {
+        ESP_LOGW(TAG, "save_to_sd skipped: json=%p assets=%zu",
+                 g_project_json, g_assets.size());
+        return;
+    }
 
     std::string json_str = g_project_json->dump();
 
@@ -911,7 +920,8 @@ static void save_current_project_to_sd(const char *project_id)
         sd_assets[i].len = g_assets[i].len;
     }
 
-    sd_save_game(project_id, project_id,
+    const char *display_name = !g_project_title.empty() ? g_project_title.c_str() : project_id;
+    sd_save_game(project_id, display_name,
                  json_str.c_str(), json_str.size(),
                  sd_assets.data(), (int)sd_assets.size());
 }

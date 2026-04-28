@@ -13,6 +13,13 @@ void sd_save_wifi(const char *ssid, const char *password);
 // Returns true if found. ssid/password buffers must be at least 64/128 bytes.
 bool sd_load_wifi(char *ssid, int ssid_size, char *password, int password_size);
 
+// Save UI language code ("en" or "jp") to SD card.
+void sd_save_lang(const char *code);
+
+// Load UI language code from SD card. Writes "en"/"jp" to code (size>=8).
+// Returns true if a value was loaded.
+bool sd_load_lang(char *code, int code_size);
+
 // ============================================================
 // Game storage: /sd/games/<project_id>/
 // ============================================================
