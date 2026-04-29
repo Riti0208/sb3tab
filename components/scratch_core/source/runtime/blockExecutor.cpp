@@ -26,12 +26,23 @@ Timer BlockExecutor::timer;
 int BlockExecutor::dragPositionOffsetX;
 int BlockExecutor::dragPositionOffsetY;
 
-// Check if a hat block's script is already running (has pending repeat blocks).
-// If running, skip execution. This matches Scratch 3.0 behavior where
-// hat blocks ignore re-triggers while their script is active.
+// Scratch 3.0 hat re-trigger semantics (verified empirically against scratch.mit.edu):
+//   event_whenkeypressed                : ignore re-trigger while running
+//   event_whenbroadcastreceived         : restart (kill running thread, run from top)
+//   event_whenbackdropswitchesto        : restart
+//   event_whenthisspriteclicked / stage : restart
+//   event_whenflagclicked               : effectively restart (stopClicked clears state first)
+// isScriptRunning is for the "ignore" path (whenkeypressed only).
+// restartScript is for the "restart" path — clear the chain's pending repeat
+// stack so runBlock walks the hat from the top with a clean state.
 static bool isScriptRunning(Sprite *sprite, Block &block) {
     auto chainIt = sprite->blockChains.find(block.blockChainID);
     return chainIt != sprite->blockChains.end() && !chainIt->second.blocksToRepeat.empty();
+}
+
+static void restartScript(Sprite *sprite, Block &block) {
+    auto chainIt = sprite->blockChains.find(block.blockChainID);
+    if (chainIt != sprite->blockChains.end()) chainIt->second.blocksToRepeat.clear();
 }
 
 std::unordered_map<std::string, BlockHandlerPtr> &BlockExecutor::getHandlers() {
@@ -238,8 +249,8 @@ void BlockExecutor::doSpriteClicking() {
                     hasClicked = true;
                     for (auto &data : sprite->blocks) {
                         if (data.opcode == "event_whenthisspriteclicked" || data.opcode == "event_whenstageclicked") {
-                            if (!isScriptRunning(sprite, data))
-                                executor.runBlock(data, sprite);
+                            restartScript(sprite, data);
+                            executor.runBlock(data, sprite);
                         }
                     }
                 }
@@ -323,7 +334,18 @@ BlockResult BlockExecutor::runCustomBlock(Sprite *sprite, Block &block, Block *c
         if (id == block.customBlockId) {
             // Set up argument values
             for (std::string arg : data.argumentIds) {
-                data.argumentValues[arg] = block.parsedInputs->find(arg) == block.parsedInputs->end() ? Value(0) : Scratch::getInputValue(block, arg, sprite);
+                auto inputIt = block.parsedInputs->find(arg);
+                if (inputIt == block.parsedInputs->end()) {
+                    data.argumentValues[arg] = Value(0);
+                    data.argumentBlockIds.erase(arg);
+                } else {
+                    data.argumentValues[arg] = Scratch::getInputValue(block, arg, sprite);
+                    if (inputIt->second.inputType == ParsedInput::BLOCK) {
+                        data.argumentBlockIds[arg] = inputIt->second.blockId;
+                    } else {
+                        data.argumentBlockIds.erase(arg);
+                    }
+                }
             }
 
             // Get the parent of the prototype block (the definition containing all blocks)
@@ -444,8 +466,8 @@ void BlockExecutor::runBroadcast(std::string broadcastToRun) {
                 std::string fieldValue = Scratch::getFieldValue(block, "BROADCAST_OPTION");
                 std::transform(fieldValue.begin(), fieldValue.end(), fieldValue.begin(), ::tolower);
                 if (fieldValue == broadcastToRun) {
-                    if (!isScriptRunning(currentSprite, block))
-                        executor.runBlock(block, currentSprite);
+                    restartScript(currentSprite, block);
+                    executor.runBlock(block, currentSprite);
                 }
             }
         }
@@ -466,8 +488,8 @@ void BlockExecutor::runBackdrop(std::string backdropToRun) {
         for (auto &block : currentSprite->blocks) {
             if (block.opcode == "event_whenbackdropswitchesto" &&
                 Scratch::getFieldValue(block, "BACKDROP") == backdropToRun) {
-                if (!isScriptRunning(currentSprite, block))
-                    executor.runBlock(block, currentSprite);
+                restartScript(currentSprite, block);
+                executor.runBlock(block, currentSprite);
             }
         }
     }
@@ -731,6 +753,39 @@ Value BlockExecutor::getCustomBlockValue(std::string valueName, Sprite *sprite, 
         Log::logWarning("Index out of bounds for argumentIds!");
     }
     return Value();
+}
+
+Value BlockExecutor::getCustomBlockBooleanValue(std::string valueName, Sprite *sprite, Block block) {
+    Block *const definitionBlock = Scratch::getBlockParent(&block, sprite);
+    const Block *prototypeBlock = Scratch::findBlock(Scratch::getInputValue(*definitionBlock, "custom_block", sprite).asString(), sprite);
+
+    for (auto &[custId, custBlock] : sprite->customBlocks) {
+        if (prototypeBlock != nullptr && custBlock.blockId != prototypeBlock->id) continue;
+
+        size_t index = custBlock.argumentNames.size();
+        for (size_t i = custBlock.argumentNames.size(); i-- > 0;) {
+            if (custBlock.argumentNames[i] == valueName) {
+                index = i;
+                break;
+            }
+        }
+        if (index == custBlock.argumentNames.size()) continue;
+        if (index >= custBlock.argumentIds.size()) continue;
+
+        const std::string &argumentId = custBlock.argumentIds[index];
+
+        // Boolean params re-evaluate the plugged-in reporter each access.
+        const auto blkIt = custBlock.argumentBlockIds.find(argumentId);
+        if (blkIt != custBlock.argumentBlockIds.end() && !blkIt->second.empty()) {
+            Block *src = Scratch::findBlock(blkIt->second, sprite);
+            if (src) return executor.getBlockValue(*src, sprite);
+        }
+
+        const auto valueIt = custBlock.argumentValues.find(argumentId);
+        if (valueIt != custBlock.argumentValues.end()) return valueIt->second;
+        return Value(false);
+    }
+    return Value(false);
 }
 
 void BlockExecutor::addToRepeatQueue(Sprite *sprite, Block *block) {

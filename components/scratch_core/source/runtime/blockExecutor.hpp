@@ -162,6 +162,13 @@ class BlockExecutor {
     static Value getCustomBlockValue(std::string valueName, Sprite *sprite, Block block);
 
     /**
+     * Like getCustomBlockValue, but for boolean parameters: re-evaluates the source
+     * block on each access (matching scratch-vm semantics) instead of returning the
+     * call-time snapshot. Falls back to the snapshot if no source block was plugged in.
+     */
+    static Value getCustomBlockBooleanValue(std::string valueName, Sprite *sprite, Block block);
+
+    /**
      * Sets the Value of the specified Scratch variable.
      * @param variableId ID of the variable to find
      * @param newValue the new Value to set.

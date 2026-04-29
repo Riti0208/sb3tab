@@ -258,8 +258,53 @@ bool SWRenderer::loadCostumeFromMemory(const std::string &name, const uint8_t *d
     cp.h = h;
     cp.rotCenterX = rotCenterX;
     cp.rotCenterY = rotCenterY;
+
+    // Compute tight bounds of visible (alpha > 0) pixels and per-row presence.
+    cp.rowSet = (uint8_t *)heap_caps_calloc(h, 1, MALLOC_CAP_SPIRAM);
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    for (int yy = 0; yy < h; yy++) {
+        const uint8_t *row = pixels + yy * w * 4;
+        bool rowHasPixel = false;
+        for (int xx = 0; xx < w; xx++) {
+            if (row[xx * 4 + 3] != 0) {
+                rowHasPixel = true;
+                if (xx < minX) minX = xx;
+                if (xx > maxX) maxX = xx;
+                if (yy < minY) minY = yy;
+                if (yy > maxY) maxY = yy;
+            }
+        }
+        if (cp.rowSet) cp.rowSet[yy] = rowHasPixel ? 1 : 0;
+    }
+    if (maxX < 0) {
+        cp.trimX = 0; cp.trimY = 0; cp.trimW = w; cp.trimH = h;
+    } else {
+        cp.trimX = minX;
+        cp.trimY = minY;
+        cp.trimW = maxX - minX + 1;
+        cp.trimH = maxY - minY + 1;
+    }
+
     costumes[name] = cp;
     return true;
+}
+
+bool SWRenderer::getCostumeTrimBounds(const std::string &name, int &trimX, int &trimY, int &trimW, int &trimH) const {
+    auto it = costumes.find(name);
+    if (it == costumes.end()) return false;
+    trimX = it->second.trimX;
+    trimY = it->second.trimY;
+    trimW = it->second.trimW;
+    trimH = it->second.trimH;
+    return true;
+}
+
+const uint8_t *SWRenderer::getCostumeRGBA(const std::string &name, int &w, int &h) const {
+    auto it = costumes.find(name);
+    if (it == costumes.end()) return nullptr;
+    w = it->second.w;
+    h = it->second.h;
+    return it->second.rgba;
 }
 
 void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
@@ -274,8 +319,10 @@ void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
     if (alpha <= 0.0f) return;
     float scale = size / 100.0f;
 
-    blitRGBA(it->second, (int)(STAGE_W / 2.0f + x), (int)(STAGE_H / 2.0f - y),
-             scale, direction - 90.0f, alpha, brightnessEffect, flipH);
+    blitRGBA(it->second,
+             (int)(STAGE_W / 2.0f + x * LOGICAL_TO_FB),
+             (int)(STAGE_H / 2.0f - y * LOGICAL_TO_FB),
+             scale * LOGICAL_TO_FB, direction - 90.0f, alpha, brightnessEffect, flipH);
 }
 
 void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
@@ -417,9 +464,9 @@ static void penPixel(uint8_t *penFb, int x, int y,
 void SWRenderer::penDot(float x, float y,
                         uint8_t r, uint8_t g, uint8_t b, uint8_t a, float thickness) {
     if (!penFb) return;
-    int cx = (int)(STAGE_W / 2.0f + x);
-    int cy = (int)(STAGE_H / 2.0f - y);
-    int rad = (int)(thickness / 2.0f + 0.5f);
+    int cx = (int)(STAGE_W / 2.0f + x * LOGICAL_TO_FB);
+    int cy = (int)(STAGE_H / 2.0f - y * LOGICAL_TO_FB);
+    int rad = (int)(thickness * LOGICAL_TO_FB / 2.0f + 0.5f);
     if (rad < 1) rad = 1;
     for (int dy = -rad; dy <= rad; dy++) {
         for (int dx = -rad; dx <= rad; dx++) {
@@ -434,16 +481,16 @@ void SWRenderer::penLine(float x1, float y1, float x2, float y2,
                          uint8_t r, uint8_t g, uint8_t b, uint8_t a, float thickness) {
     if (!penFb) return;
     // Bresenham with thickness via penDot at each step
-    int sx = (int)(STAGE_W / 2.0f + x1);
-    int sy = (int)(STAGE_H / 2.0f - y1);
-    int ex = (int)(STAGE_W / 2.0f + x2);
-    int ey = (int)(STAGE_H / 2.0f - y2);
+    int sx = (int)(STAGE_W / 2.0f + x1 * LOGICAL_TO_FB);
+    int sy = (int)(STAGE_H / 2.0f - y1 * LOGICAL_TO_FB);
+    int ex = (int)(STAGE_W / 2.0f + x2 * LOGICAL_TO_FB);
+    int ey = (int)(STAGE_H / 2.0f - y2 * LOGICAL_TO_FB);
 
     int dx = abs(ex - sx), dy = -abs(ey - sy);
     int stepX = sx < ex ? 1 : -1;
     int stepY = sy < ey ? 1 : -1;
     int err = dx + dy;
-    int rad = (int)(thickness / 2.0f + 0.5f);
+    int rad = (int)(thickness * LOGICAL_TO_FB / 2.0f + 0.5f);
     if (rad < 1) rad = 1;
 
     while (true) {
@@ -476,8 +523,9 @@ void SWRenderer::penStampSprite(const std::string &costumeMd5ext, float x, float
 
     float rad = (direction - 90.0f) * M_PI / 180.0f;
     float cosA = cosf(rad), sinA = sinf(rad);
-    int cx = (int)(STAGE_W / 2.0f + x);
-    int cy = (int)(STAGE_H / 2.0f - y);
+    scale *= LOGICAL_TO_FB;
+    int cx = (int)(STAGE_W / 2.0f + x * LOGICAL_TO_FB);
+    int cy = (int)(STAGE_H / 2.0f - y * LOGICAL_TO_FB);
 
     float corners[4][2] = {
         { (float)-cos.rotCenterX * scale, (float)-cos.rotCenterY * scale },
@@ -602,11 +650,21 @@ void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
     const unsigned uh = (unsigned)cos.h;
     const int stride = cos.w * 4;
 
+    const bool noRotation = (sinA == 0.0f);
     for (int dy = minY; dy <= maxY; dy++) {
         float u0 = (float)(minX - cx) * invScale;
         float v0 = (float)(dy - cy) * invScale;
         int32_t srcX_fp = (int32_t)((cosA * u0 + sinA * v0 + cos.rotCenterX) * 65536.0f);
         int32_t srcY_fp = (int32_t)((-sinA * u0 + cosA * v0 + cos.rotCenterY) * 65536.0f);
+
+        // Skip whole row if its source row is entirely transparent.
+        // Only safe for non-rotated blits (otherwise srcY varies along the row).
+        if (noRotation && cos.rowSet) {
+            int srcY0 = srcY_fp >> 16;
+            if (srcY0 >= 0 && srcY0 < (int)uh && cos.rowSet[srcY0] == 0) {
+                continue;
+            }
+        }
 
         uint8_t *dstRow = fb[currentFb] + (dy * STAGE_W + minX) * 3;
 

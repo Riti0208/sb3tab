@@ -253,6 +253,21 @@ extern "C" void render_set_costume_size_callback(
 );
 extern "C" void render_set_input_callback(void (*cb)());
 
+// Override the weak symbol in scratch_core so its pixel-perfect collision can
+// pull RGBA pixels from our SWRenderer (headless build has no Image cache).
+extern "C" const uint8_t *render_get_costume_rgba(const char *name, int *w, int *h) {
+    if (!renderer || !name || !w || !h) return nullptr;
+    return renderer->getCostumeRGBA(name, *w, *h);
+}
+
+extern "C" {
+int collision_g_call_count();
+int collision_g_cache_hit();
+int collision_g_inner_iters();
+int64_t collision_g_total_us();
+void collision_reset_counters();
+}
+
 // ============================================================
 // Gamepad → Scratch input callback
 // ============================================================
@@ -484,6 +499,13 @@ static void render_helper_task(void *param) {
 static int s_frame_count = 0;
 static int64_t s_total_step = 0, s_total_render = 0, s_total_lcd = 0;
 
+// Tick rate is driven by Scratch::FPS (set by parser from project config,
+// defaults to 30). Turbo mode in real Scratch doesn't change tick rate — it
+// disables yields between repeat iterations within a tick. We approximate by
+// uncapping the runtime loop when turbo is on, letting scripts step as fast
+// as the CPU allows. (Proper turbo semantics — multiple iterations per tick
+// without yielding — would need scratch_core changes; not implemented yet.)
+
 static void scratch_runtime_task(void *param)
 {
     s_frame_count = 0;
@@ -589,15 +611,39 @@ static void scratch_runtime_task(void *param)
             xSemaphoreGive(s_render_start);
 
             s_frame_count++;
+            // Accumulate frame phase totals
+            s_total_step += t1 - t0;
+            s_total_render += r4 - r1;
+            s_total_lcd += t3 - r4;
             if ((s_frame_count % 60) == 1) {
-                ESP_LOGI(TAG, "RT: frame %d", s_frame_count);
+                int calls = collision_g_call_count();
+                int hits = collision_g_cache_hit();
+                int64_t us = collision_g_total_us();
+                ESP_LOGI(TAG, "RT: frame %d  step=%lldus render=%lldus lcd=%lldus  collision: calls=%d hits=%d total=%lldus",
+                         s_frame_count, s_total_step / 60, s_total_render / 60, s_total_lcd / 60,
+                         calls, hits, us);
+                collision_reset_counters();
+                s_total_step = 0;
+                s_total_render = 0;
+                s_total_lcd = 0;
             }
             // Frame stats disabled - usb_ll_write blocks when host doesn't read, freezing render loop
         }
         xSemaphoreGive(sprite_mutex);
 
         if (!running) break;
-        vTaskDelay(1);
+        // Throttle to the project's declared FPS (parser default 30Hz).
+        // We forced Scratch::turbo above so scripts step every iteration, so
+        // the loop period is the effective tick rate.
+        const int fps = Scratch::FPS > 0 ? Scratch::FPS : 30;
+        const int64_t frame_us = 1000000 / fps;
+        int64_t elapsed = esp_timer_get_time() - t0;
+        int64_t sleep_us = frame_us - elapsed;
+        if (sleep_us > 1000) {
+            vTaskDelay(pdMS_TO_TICKS((int)(sleep_us / 1000)));
+        } else {
+            vTaskDelay(1);
+        }
     }
     scratch_running = false;
     ESP_LOGI(TAG, "RT: exiting (frames=%d)", s_frame_count);
@@ -693,6 +739,14 @@ static bool load_and_run()
                         sprite->spriteWidth = cw;
                         sprite->spriteHeight = ch;
                     }
+                    // Tight bounds of visible pixels for AABB collision
+                    int tx, ty, tw, th;
+                    if (renderer->getCostumeTrimBounds(costume.fullName, tx, ty, tw, th)) {
+                        costume.trimOffsetX = tx;
+                        costume.trimOffsetY = ty;
+                        costume.trimWidth = tw;
+                        costume.trimHeight = th;
+                    }
                     break;
                 }
             }
@@ -710,8 +764,20 @@ static bool load_and_run()
     }
 
     usb_ll_write("INIT\n");
+    // Force scratch_core's "turbo" path so scripts step every runtime-loop
+    // iteration. The actual tick rate is set by the loop throttle below using
+    // Scratch::FPS (parser reads the project's framerate, defaults to 30).
+    // This is unrelated to Scratch's user-facing turbo mode (which means
+    // "no yields between repeat iterations within a tick" — not implemented).
+    // Without this override, FreeRTOS' 10ms tick granularity rounds the
+    // throttle below the parser's 33ms checkFPS threshold and scripts skip
+    // every other tick, running games at half speed.
     Scratch::turbo = true;
-    Scratch::accurateCollision = false;  // No bitmask images on headless; use fast AABB collision
+    // Pixel-perfect collision: bitmask is built lazily from SWRenderer RGBA
+    // (see render_get_costume_rgba). Required for projects with sprites whose
+    // SVG bounding box is much larger than the visible art (e.g., ground sprites
+    // with extra decorative elements).
+    Scratch::accurateCollision = true;
     Scratch::initializeScratchProject();
 
     // Auto-map gamepad buttons based on keys used in project

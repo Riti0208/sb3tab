@@ -8,6 +8,10 @@
 constexpr unsigned int bitmaskScaleFactor = 3;
 #elif defined(__3DS__) || defined(WII)
 constexpr unsigned int bitmaskScaleFactor = 2;
+#elif defined(RENDERER_HEADLESS)
+// Headless ESP32-P4: large SVG ground sprites generate ~200K bitmask cells at
+// scale 1, which makes per-frame touching checks dominate the frame budget.
+constexpr unsigned int bitmaskScaleFactor = 3;
 #else
 constexpr unsigned int bitmaskScaleFactor = 1;
 #endif

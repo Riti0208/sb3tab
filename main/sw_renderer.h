@@ -6,9 +6,13 @@
 #include <unordered_map>
 #include "esp_http_client.h"
 
-// Scratch stage dimensions
-#define STAGE_W 480
-#define STAGE_H 360
+// Framebuffer at 4/5 of Scratch's 480x360 logical stage.
+// PPA SRM upscales 2.5x to the DSI scratch region (960x720). Non-integer
+// scaling means pixels expand unevenly (alternating 2/3-pixel groups) but
+// the detail is visibly better than 320x240, and blit work is ~64% of full.
+#define STAGE_W 384
+#define STAGE_H 288
+#define LOGICAL_TO_FB 0.8f
 
 struct CostumePixels {
     uint8_t *rgba = nullptr;  // RGBA8888
@@ -16,6 +20,13 @@ struct CostumePixels {
     int h = 0;
     double rotCenterX = 0;
     double rotCenterY = 0;
+    // Trimmed (visible) bounds in costume pixel coords. Used for AABB collision
+    // so transparent SVG padding doesn't inflate the hitbox.
+    int trimX = 0, trimY = 0, trimW = 0, trimH = 0;
+    // Per-row visibility: 1 if that costume row has any non-transparent pixel,
+    // 0 if fully empty. Lets the blit loop skip whole-row no-ops, big win for
+    // SVGs with sparse content (e.g. ground sprite with transparent middle).
+    uint8_t *rowSet = nullptr;
 };
 
 class SWRenderer {
@@ -66,6 +77,13 @@ public:
 
     // Get costume dimensions (returns false if not found)
     bool getCostumeSize(const std::string &name, int &w, int &h) const;
+
+    // Get trimmed (visible-pixel) bounds in costume pixel coords
+    bool getCostumeTrimBounds(const std::string &name, int &trimX, int &trimY, int &trimW, int &trimH) const;
+
+    // Get raw RGBA pixel buffer for a costume (used by pixel-perfect collision).
+    // Returns nullptr if not loaded.
+    const uint8_t *getCostumeRGBA(const std::string &name, int &w, int &h) const;
 
     // Encode framebuffer as JPEG, returns malloc'd buffer (caller must free)
     uint8_t *encodeJpeg(int quality, int *outSize);

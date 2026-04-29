@@ -167,6 +167,10 @@ struct CustomBlock {
     std::vector<std::string> argumentNames;
     std::vector<std::string> argumentDefaults;
     std::unordered_map<std::string, Value> argumentValues;
+    // Source block IDs for arguments plugged in as block reporters.
+    // Boolean reporters (argument_reporter_boolean) re-evaluate these each access,
+    // matching scratch-vm semantics where boolean params are not snapshotted.
+    std::unordered_map<std::string, std::string> argumentBlockIds;
     bool runWithoutScreenRefresh;
 };
 
@@ -203,8 +207,16 @@ struct Costume {
     bool isSVG;
     double rotationCenterX;
     double rotationCenterY;
+    // Tight bounds of visible (non-transparent) pixels in costume pixel coords.
+    // Filled in by the renderer after rasterization. Used for AABB collision so
+    // SVG padding around the visible art doesn't inflate the hitbox.
+    int trimOffsetX = 0;
+    int trimOffsetY = 0;
+    int trimWidth = 0;
+    int trimHeight = 0;
 
     std::shared_ptr<Bitmask> bitmask = nullptr;
+    bool bitmaskGenFailed = false;  // Avoid retrying failed gen every frame.
 };
 
 struct Comment {
