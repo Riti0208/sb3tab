@@ -78,22 +78,29 @@ LANGUAGE_NAMES = "日本語한국어简体中文"
 
 # Baseline JP coverage so user content (Scratch project titles, SSIDs, speech
 # bubbles) still renders even if a character isn't in the i18n.cpp tables.
-# Hiragana + Katakana full ranges + 223 common kanji from the original subset.
-JP_BASELINE_KANJI = (
-    "一七万三上下不世中九事二五人今仕会低体何作使供信像兄先光入全八六内円写冬出分初"
-    "前力動北十千半南去友口古可史右合同名問喜四回図国土在地夏外多夜夢大天女好妹姉始"
-    "嫌子学実家寝小少届山川左希帰年座弟待後心必忘怒思悲想愛憶手技教数新方族日春昼時"
-    "書最月望朝木未本村来東校楽次止正歩歴母気水法泣海火父現理生用男町界白百目知短社"
-    "秋科秒空立笑第答終緑美習考耳聞育能色花苦英行術西要見覚言計記話語読負質赤走起足"
-    "車送過道達違部金長閉開間際雨雪電青音頭頼題風食飲駅高黄黒"
-)
+# Hiragana + Katakana full ranges + JIS X 0208 Level 1 (第一水準, 2965 kanji),
+# which is a superset of the 2136 JOYO kanji and also covers common names and
+# place names. Extracted deterministically from Python's `euc_jp` codec.
+def jis_level1_kanji() -> set[int]:
+    """All CJK Unified Ideographs in JIS X 0208 第一水準 (rows 16-47)."""
+    out = set()
+    for row in range(16, 48):
+        for col in range(1, 95):
+            try:
+                c = bytes([0xA0 + row, 0xA0 + col]).decode("euc_jp")
+            except UnicodeDecodeError:
+                continue
+            cp = ord(c)
+            if 0x4E00 <= cp <= 0x9FFF:
+                out.add(cp)
+    return out
 
 
 def jp_baseline() -> set[int]:
     extras = set()
     extras.update(range(0x3040, 0x30A0))  # Hiragana
     extras.update(range(0x30A0, 0x3100))  # Katakana
-    extras.update(ord(c) for c in JP_BASELINE_KANJI)
+    extras.update(jis_level1_kanji())     # JIS X 0208 Level 1 (2965 kanji)
     return extras
 
 
