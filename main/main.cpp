@@ -775,6 +775,45 @@ static bool load_and_run()
         return false;
     };
 
+    // Phase 1: load ALL sounds first, BEFORE any costume RGBA fragments PSRAM.
+    // The BGM PCM can be multi-MB (a 1.3 MB MP3 expands to ~7 MB mono int16),
+    // and on a project re-load PSRAM fills with 100 KB-class costume buffers
+    // that quickly chew the largest contiguous block from ~7 MB down to ~1 MB
+    // — too small to fit the BGM and the alloc fails. Loading sounds first
+    // lets the largest sound claim a clean contiguous block before fragmentation.
+    for (auto &sprite : Scratch::sprites) {
+        for (auto &sound : sprite->sounds) {
+            if (sound.fullName.empty()) continue;
+            bool ok = resolve_asset(sound.fullName, [&](const uint8_t *data, size_t len, bool from_sd) {
+                SoundPlayer::loadSoundFromMemory(sound.fullName, data, len,
+                                                  /*force_copy=*/from_sd);
+            });
+            if (!ok) {
+                ESP_LOGW(TAG, "sound asset MISSING: '%s' (sprite='%s')",
+                         sound.fullName.c_str(), sprite->name.c_str());
+            }
+        }
+    }
+
+    // After sounds claim their PSRAM, shrink the costume LRU budget to what's
+    // actually available so eviction happens during the load loop (predictable)
+    // rather than at first-display time (where a re-decode failure would leave
+    // a sprite invisible). 2 MB safety margin keeps room for runtime
+    // allocations (pen layer, JPEG encoders, transient HTTP buffers).
+    if (renderer) {
+        size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const size_t SAFETY_MARGIN = 2 * 1024 * 1024;
+        const size_t MIN_BUDGET = 2 * 1024 * 1024;
+        const size_t MAX_BUDGET = 8 * 1024 * 1024;
+        size_t budget = (psram_free > SAFETY_MARGIN) ? psram_free - SAFETY_MARGIN : MIN_BUDGET;
+        if (budget > MAX_BUDGET) budget = MAX_BUDGET;
+        if (budget < MIN_BUDGET) budget = MIN_BUDGET;
+        renderer->setCostumeBudgetBytes(budget);
+        ESP_LOGI(TAG, "Costume LRU budget set to %zu KB (PSRAM free=%zu KB)",
+                 budget / 1024, psram_free / 1024);
+    }
+
+    // Phase 2: costumes
     for (auto &sprite : Scratch::sprites) {
         for (auto &costume : sprite->costumes) {
             if (costume.fullName.empty()) continue;
@@ -796,17 +835,6 @@ static bool load_and_run()
                     costume.trimHeight = th;
                 }
             });
-        }
-        for (auto &sound : sprite->sounds) {
-            if (sound.fullName.empty()) continue;
-            bool ok = resolve_asset(sound.fullName, [&](const uint8_t *data, size_t len, bool from_sd) {
-                SoundPlayer::loadSoundFromMemory(sound.fullName, data, len,
-                                                  /*force_copy=*/from_sd);
-            });
-            if (!ok) {
-                ESP_LOGW(TAG, "sound asset MISSING: '%s' (sprite='%s')",
-                         sound.fullName.c_str(), sprite->name.c_str());
-            }
         }
     }
 
