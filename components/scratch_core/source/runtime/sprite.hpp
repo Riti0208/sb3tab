@@ -54,12 +54,12 @@ struct ParsedInput {
 
     Value literalValue;
 
-    std::string variableId;
+    // Variable id (when inputType == VARIABLE) or block id (when == BLOCK).
+    // Mutually exclusive by inputType, so we share a single string slot.
+    std::string ref;
 #ifdef ENABLE_CACHING
     Variable *variable = nullptr;
 #endif
-
-    std::string blockId;
 };
 
 // Per-block opcode-specific runtime state. Lazy-allocated via Block::op()

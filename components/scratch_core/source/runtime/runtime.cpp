@@ -663,10 +663,10 @@ Value Scratch::getInputValue(Block &block, const std::string &inputName, Sprite 
 #ifdef ENABLE_CACHING
         if (input.variable != nullptr) return input.variable->value;
 #endif
-        return BlockExecutor::getVariableValue(input.variableId, sprite);
+        return BlockExecutor::getVariableValue(input.ref, sprite);
 
     case ParsedInput::BLOCK:
-        return executor.getBlockValue(*findBlock(input.blockId, sprite), sprite);
+        return executor.getBlockValue(*findBlock(input.ref, sprite), sprite);
     }
 
     return Value();

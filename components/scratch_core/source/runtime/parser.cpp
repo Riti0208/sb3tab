@@ -254,22 +254,22 @@ void Parser::loadSprites(const nlohmann::json &json) {
                             newSprite->customBlockDefinitions[inputValue.get<std::string>()] = newBlock.id;
                         } else {
                             parsedInput.inputType = ParsedInput::BLOCK;
-                            parsedInput.blockId = inputValue.get<std::string>();
+                            parsedInput.ref = inputValue.get<std::string>();
                         }
 
                     } else if (type == 3) {
                         if (inputValue.is_array()) {
                             parsedInput.inputType = ParsedInput::VARIABLE;
-                            parsedInput.variableId = inputValue[2].get<std::string>();
+                            parsedInput.ref = inputValue[2].get<std::string>();
                         } else {
                             parsedInput.inputType = ParsedInput::BLOCK;
                             if (!inputValue.is_null())
-                                parsedInput.blockId = inputValue.get<std::string>();
+                                parsedInput.ref = inputValue.get<std::string>();
                         }
                     } else if (type == 2) {
                         if (inputValue.is_array()) {
                             parsedInput.inputType = ParsedInput::VARIABLE;
-                            parsedInput.variableId = inputValue[2].get<std::string>();
+                            parsedInput.ref = inputValue[2].get<std::string>();
                         } else if (newBlock.opcode == "procedures_definition" && inputValue.is_string()) {
                             parsedInput.inputType = ParsedInput::LITERAL;
                             parsedInput.literalValue = Value(inputValue.get<std::string>());
@@ -277,7 +277,7 @@ void Parser::loadSprites(const nlohmann::json &json) {
                         } else {
                             parsedInput.inputType = ParsedInput::BLOCK;
                             if (!inputValue.is_null())
-                                parsedInput.blockId = inputValue.get<std::string>();
+                                parsedInput.ref = inputValue.get<std::string>();
                         }
                     }
                     (*newBlock.parsedInputs)[inputName] = parsedInput;
@@ -691,10 +691,10 @@ std::vector<Block *> Parser::getBlockChain(std::string blockId, Sprite *sprite, 
         auto substackIt = currentBlock->parsedInputs->find("SUBSTACK");
         if (substackIt != currentBlock->parsedInputs->end() &&
             substackIt->second.inputType == ParsedInput::BLOCK &&
-            !substackIt->second.blockId.empty()) {
+            !substackIt->second.ref.empty()) {
 
             std::vector<Block *> subBlockChain;
-            subBlockChain = getBlockChain(substackIt->second.blockId, sprite, outID);
+            subBlockChain = getBlockChain(substackIt->second.ref, sprite, outID);
             for (auto &block : subBlockChain) {
                 blockChain.push_back(block);
                 if (outID)
@@ -705,10 +705,10 @@ std::vector<Block *> Parser::getBlockChain(std::string blockId, Sprite *sprite, 
         auto substack2It = currentBlock->parsedInputs->find("SUBSTACK2");
         if (substack2It != currentBlock->parsedInputs->end() &&
             substack2It->second.inputType == ParsedInput::BLOCK &&
-            !substack2It->second.blockId.empty()) {
+            !substack2It->second.ref.empty()) {
 
             std::vector<Block *> subBlockChain;
-            subBlockChain = getBlockChain(substack2It->second.blockId, sprite, outID);
+            subBlockChain = getBlockChain(substack2It->second.ref, sprite, outID);
             for (auto &block : subBlockChain) {
                 blockChain.push_back(block);
                 if (outID)

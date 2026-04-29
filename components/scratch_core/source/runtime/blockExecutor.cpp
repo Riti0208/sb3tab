@@ -105,13 +105,13 @@ void BlockExecutor::linkPointers(Sprite *sprite) {
         for (auto &[id, input] : *block.parsedInputs) {
             if (input.inputType != ParsedInput::VARIABLE) continue;
 
-            auto it = sprite->variables.find(input.variableId);
+            auto it = sprite->variables.find(input.ref);
             if (it != sprite->variables.end()) {
                 input.variable = &it->second;
                 continue;
             }
 
-            auto globalIt = Scratch::stageSprite->variables.find(input.variableId);
+            auto globalIt = Scratch::stageSprite->variables.find(input.ref);
             if (globalIt != Scratch::stageSprite->variables.end()) {
                 input.variable = &globalIt->second;
                 continue;
@@ -391,7 +391,7 @@ BlockResult BlockExecutor::runCustomBlock(Sprite *sprite, Block &block, Block *c
                 } else {
                     data.argumentValues[arg] = Scratch::getInputValue(block, arg, sprite);
                     if (inputIt->second.inputType == ParsedInput::BLOCK) {
-                        data.argumentBlockIds[arg] = inputIt->second.blockId;
+                        data.argumentBlockIds[arg] = inputIt->second.ref;
                     } else {
                         data.argumentBlockIds.erase(arg);
                     }
