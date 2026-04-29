@@ -345,9 +345,15 @@ void Parser::loadSprites(const nlohmann::json &json) {
             }
         }
         Log::log("LS[" + std::to_string(spriteIdx) + "]: blocksMap");
-        // setup blocksMap
+        // setup blocksMap and key-hat indices
+        newSprite->blocksMap.reserve(newSprite->blocks.size());
         for (auto &block : newSprite->blocks) {
             newSprite->blocksMap[block.id] = &block;
+            if (block.opcode == "event_whenkeypressed") {
+                newSprite->keyHatBlocks.push_back(&block);
+            } else if (block.opcode == "makeymakey_whenMakeyKeyPressed") {
+                newSprite->makeyKeyHatBlocks.push_back(&block);
+            }
         }
 
         Log::log("LS[" + std::to_string(spriteIdx) + "]: lists");

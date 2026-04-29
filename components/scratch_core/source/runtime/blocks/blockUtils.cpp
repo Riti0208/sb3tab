@@ -8,11 +8,9 @@ BlockResult nopBlock(Block &block, Sprite *sprite, bool *withoutScreenRefresh, b
 // Include all block files here so they share a single translation unit.
 #ifdef __ESP32__
 #include "control.cpp"
-#include "coreExample.cpp"
 #include "data.cpp"
 #include "events.cpp"
 #include "looks.cpp"
-#include "makeymakey.cpp"
 #include "motion.cpp"
 #include "operators.cpp"
 #include "pen.cpp"
@@ -20,5 +18,8 @@ BlockResult nopBlock(Block &block, Sprite *sprite, bool *withoutScreenRefresh, b
 #include "sensing.cpp"
 #include "shadow.cpp"
 #include "sound.cpp"
-#include "text2speech.cpp"
+// Removed for ESP32: coreExample (sample only), makeymakey (HW-specific),
+// text2speech (requires ENABLE_DOWNLOAD which is not set; body is dead code).
+// Projects referencing these opcodes will hit the generic "Unknown block"
+// path and continue without crashing.
 #endif

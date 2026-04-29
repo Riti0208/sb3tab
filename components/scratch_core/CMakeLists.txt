@@ -71,11 +71,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -w)
 # Prevent linker from stripping static block registrations (SCRATCH_BLOCK macros)
 set(BLOCK_CTORS
     _GLOBAL__sub_I__Z17block_control_if_R5BlockP6SpritePbb
-    _GLOBAL__sub_I__Z32block_coreExample_exampleOpcode_R5BlockP6Sprite
     _GLOBAL__sub_I__Z25block_data_setvariableto_R5BlockP6SpritePbb
     _GLOBAL__sub_I__Z22block_event_broadcast_R5BlockP6SpritePbb
     _GLOBAL__sub_I__Z16block_looks_say_R5BlockP6SpritePbb
-    _GLOBAL__sub_I__Z32block_makemakey_whenCodePressed_R5BlockP6SpritePbb
     _GLOBAL__sub_I__Z23block_motion_movesteps_R5BlockP6SpritePbb
     _GLOBAL__sub_I__Z19block_operator_add_R5BlockP6Sprite
     _GLOBAL__sub_I__Z18block_pen_penDown_R5BlockP6SpritePbb
@@ -83,7 +81,6 @@ set(BLOCK_CTORS
     _GLOBAL__sub_I__Z25block_sensing_resettimer_R5BlockP6SpritePbb
     _GLOBAL__sub_I__Z13block_matrix_R5BlockP6Sprite
     _GLOBAL__sub_I__Z26block_sound_playuntildone_R5BlockP6SpritePbb
-    _GLOBAL__sub_I__Z31block_text2speech_speakAndWait_R5BlockP6SpritePbb
 )
 foreach(SYM ${BLOCK_CTORS})
     target_link_options(${COMPONENT_LIB} INTERFACE "LINKER:--undefined=${SYM}")

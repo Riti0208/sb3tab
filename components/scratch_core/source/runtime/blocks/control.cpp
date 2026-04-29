@@ -15,8 +15,7 @@ SCRATCH_BLOCK(control, if) {
     const bool condition = conditionValue.asBoolean();
     const auto it = block.parsedInputs->find("SUBSTACK");
     Block *const subBlock = it == block.parsedInputs->end() ? nullptr : sprite->blocksMap[it->second.blockId];
-    std::vector<std::string> blockID;
-    Block *repeatBlock;
+    const std::vector<Block *> *blockID = nullptr;
 
     if (!fromRepeat) {
         BlockExecutor::addToRepeatQueue(sprite, &block);
@@ -26,10 +25,9 @@ SCRATCH_BLOCK(control, if) {
 
     if (!condition || subBlock == nullptr) goto end;
     executor.runBlock(*subBlock, sprite, withoutScreenRefresh, false);
-    blockID = sprite->blockChains[block.blockChainID].blocksToRepeat;
-    if (blockID.empty()) return BlockResult::RETURN;
-    repeatBlock = sprite->blocksMap[blockID.back()];
-    if (!repeatBlock || repeatBlock != &block) return BlockResult::RETURN;
+    blockID = &sprite->blockChains[block.blockChainID].blocksToRepeat;
+    if (blockID->empty()) return BlockResult::RETURN;
+    if (blockID->back() != &block) return BlockResult::RETURN;
 
 end:
     BlockExecutor::removeFromRepeatQueue(sprite, &block);
@@ -41,8 +39,7 @@ SCRATCH_BLOCK(control, if_else) {
     const bool condition = conditionValue.asBoolean();
     const std::string key = condition ? "SUBSTACK" : "SUBSTACK2";
     const auto it = block.parsedInputs->find(key);
-    std::vector<std::string> blockID;
-    Block *repeatBlock;
+    const std::vector<Block *> *blockID = nullptr;
 
     if (!fromRepeat) {
         BlockExecutor::addToRepeatQueue(sprite, &block);
@@ -58,10 +55,9 @@ SCRATCH_BLOCK(control, if_else) {
     Block *const subBlock = sprite->blocksMap[it->second.blockId];
     if (subBlock == nullptr) goto end;
     executor.runBlock(*subBlock, sprite, withoutScreenRefresh, false);
-    blockID = sprite->blockChains[block.blockChainID].blocksToRepeat;
-    if (blockID.empty()) return BlockResult::RETURN;
-    repeatBlock = sprite->blocksMap[blockID.back()];
-    if (!repeatBlock || repeatBlock != &block) return BlockResult::RETURN;
+    blockID = &sprite->blockChains[block.blockChainID].blocksToRepeat;
+    if (blockID->empty()) return BlockResult::RETURN;
+    if (blockID->back() != &block) return BlockResult::RETURN;
 
 end:
     BlockExecutor::removeFromRepeatQueue(sprite, &block);
@@ -96,10 +92,18 @@ SCRATCH_BLOCK(control, create_clone_of) {
     clonedSprite->toDelete = false;
     clonedSprite->renderInfo.forceUpdate = true;
 
-    // Regenerate blocksMap
+    // Regenerate blocksMap and key-hat indices
     clonedSprite->blocksMap.clear();
+    clonedSprite->blocksMap.reserve(clonedSprite->blocks.size());
+    clonedSprite->keyHatBlocks.clear();
+    clonedSprite->makeyKeyHatBlocks.clear();
     for (auto &block : clonedSprite->blocks) {
         clonedSprite->blocksMap[block.id] = &block;
+        if (block.opcode == "event_whenkeypressed") {
+            clonedSprite->keyHatBlocks.push_back(&block);
+        } else if (block.opcode == "makeymakey_whenMakeyKeyPressed") {
+            clonedSprite->makeyKeyHatBlocks.push_back(&block);
+        }
     }
 
 #ifdef ENABLE_CACHING

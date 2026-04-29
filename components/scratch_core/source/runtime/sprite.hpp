@@ -67,11 +67,14 @@ struct Block {
     std::string customBlockId;
     std::string opcode;
     std::string next;
-    Block *nextBlock;
+    Block *nextBlock = nullptr;
     std::string parent;
     std::string blockChainID;
     std::unique_ptr<std::map<std::string, ParsedInput>> parsedInputs;
-    std::shared_ptr<std::map<std::string, ParsedField>> parsedFields;
+    // Read-only after parse, deep-copied on clone. unique_ptr is 8 bytes
+    // (vs shared_ptr's 16) and the per-clone deep-copy is cheap because
+    // most blocks have 0-3 fields.
+    std::unique_ptr<std::map<std::string, ParsedField>> parsedFields;
     bool shadow;
     bool topLevel;
 
@@ -92,11 +95,13 @@ struct Block {
     double glideEndX, glideEndY;
     Timer waitTimer;
     Block *customBlockPtr = nullptr;
-    std::vector<std::pair<Block *, Sprite *>> broadcastsRun;
-    std::vector<std::pair<Block *, Sprite *>> backdropsRun;
+    // Lazy-allocated only for blocks that actually broadcast/switch backdrops
+    // (a tiny minority of blocks). Saves ~32 bytes per block in typical projects.
+    std::unique_ptr<std::vector<std::pair<Block *, Sprite *>>> broadcastsRun;
+    std::unique_ptr<std::vector<std::pair<Block *, Sprite *>>> backdropsRun;
 
     Block() {
-        parsedFields = std::make_shared<std::map<std::string, ParsedField>>();
+        parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
         parsedInputs = std::make_unique<std::map<std::string, ParsedInput>>();
     }
 
@@ -111,7 +116,11 @@ struct Block {
           glideStartX(other.glideStartX), glideStartY(other.glideStartY),
           glideEndX(other.glideEndX), glideEndY(other.glideEndY),
           waitTimer(other.waitTimer), customBlockPtr(nullptr) {
-        parsedFields = other.parsedFields;
+        if (other.parsedFields) {
+            parsedFields = std::make_unique<std::map<std::string, ParsedField>>(*other.parsedFields);
+        } else {
+            parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
+        }
 
         if (other.parsedInputs) {
             parsedInputs = std::make_unique<std::map<std::string, ParsedInput>>(*other.parsedInputs);
@@ -237,7 +246,9 @@ struct Broadcast {
 
 struct BlockChain {
     std::vector<Block *> blockChain;
-    std::vector<std::string> blocksToRepeat;
+    // Stored as Block* (not string IDs) so the per-frame execution path can
+    // skip blocksMap.find() entirely. Block addresses are stable after parse.
+    std::vector<Block *> blocksToRepeat;
 };
 
 struct Monitor {
@@ -322,7 +333,7 @@ class Sprite {
 
     std::unordered_map<std::string, Variable> variables;
     std::vector<Block> blocks;
-    std::map<std::string, Block *> blocksMap;
+    std::unordered_map<std::string, Block *> blocksMap;
     std::unordered_map<std::string, List> lists;
     std::vector<Sound> sounds;
     std::vector<Costume> costumes;
@@ -330,7 +341,12 @@ class Sprite {
     std::unordered_map<std::string, Broadcast> broadcasts;
     std::unordered_map<std::string, CustomBlock> customBlocks;
     std::unordered_map<std::string, std::string> customBlockDefinitions;
-    std::map<std::string, BlockChain> blockChains;
+    std::unordered_map<std::string, BlockChain> blockChains;
+
+    // Pre-built indices for hot-path event hat lookup (avoid scanning all
+    // blocks every frame in BlockExecutor::executeKeyHats).
+    std::vector<Block *> keyHatBlocks;       // event_whenkeypressed
+    std::vector<Block *> makeyKeyHatBlocks;  // makeymakey_whenMakeyKeyPressed
 
     ~Sprite() {
         variables.clear();
@@ -344,5 +360,7 @@ class Sprite {
         customBlocks.clear();
         blockChains.clear();
         collisionPoints.clear();
+        keyHatBlocks.clear();
+        makeyKeyHatBlocks.clear();
     }
 };

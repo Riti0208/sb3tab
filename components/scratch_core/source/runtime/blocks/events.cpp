@@ -27,14 +27,17 @@ SCRATCH_BLOCK(event, broadcastandwait) {
         return BlockResult::CONTINUE;
     }
 
-    if (block.broadcastsRun.empty()) {
+    if (!block.broadcastsRun || block.broadcastsRun->empty()) {
+        if (!block.broadcastsRun) {
+            block.broadcastsRun = std::make_unique<std::vector<std::pair<Block *, Sprite *>>>();
+        }
         for (Sprite *spr : Scratch::sprites) {
             for (auto &[id, chain] : spr->blockChains) {
                 if (chain.blocksToRepeat.empty()) continue;
 
                 for (auto &chainBlock : chain.blockChain) {
                     if (chainBlock->opcode == "event_whenbroadcastreceived" && Scratch::getFieldValue(*chainBlock, "BROADCAST_OPTION") == broadcastName) {
-                        block.broadcastsRun.push_back({chainBlock, spr});
+                        block.broadcastsRun->push_back({chainBlock, spr});
                         break;
                     }
                 }
@@ -43,7 +46,7 @@ SCRATCH_BLOCK(event, broadcastandwait) {
     }
 
     bool shouldEnd = true;
-    for (auto &[blockPtr, spritePtr] : block.broadcastsRun) {
+    for (auto &[blockPtr, spritePtr] : *block.broadcastsRun) {
         if (spritePtr->toDelete) continue;
         if (!spritePtr->blockChains[blockPtr->blockChainID].blocksToRepeat.empty()) {
             shouldEnd = false;
@@ -54,7 +57,7 @@ SCRATCH_BLOCK(event, broadcastandwait) {
     if (!shouldEnd) return BlockResult::RETURN;
 
     BlockExecutor::removeFromRepeatQueue(sprite, &block);
-    block.broadcastsRun.clear();
+    block.broadcastsRun.reset();
     return BlockResult::CONTINUE;
 }
 

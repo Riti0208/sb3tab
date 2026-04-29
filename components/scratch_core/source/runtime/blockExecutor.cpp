@@ -56,10 +56,8 @@ static void restartScript(Sprite *sprite, Block &block) {
 
         auto it = sprite->blockChains.find(chainId);
         if (it == sprite->blockChains.end()) continue;
-        for (const auto &blockId : it->second.blocksToRepeat) {
-            auto blockIt = sprite->blocksMap.find(blockId);
-            if (blockIt == sprite->blocksMap.end() || !blockIt->second) continue;
-            Block *b = blockIt->second;
+        for (Block *b : it->second.blocksToRepeat) {
+            if (!b) continue;
             if (b->opcode == "procedures_call" && b->customBlockPtr != nullptr) {
                 worklist.push_back(b->customBlockPtr->blockChainID);
             }
@@ -87,6 +85,14 @@ void BlockExecutor::linkPointers(Sprite *sprite) {
     auto &vh = getValueHandlers();
 
     for (auto &block : sprite->blocks) {
+        // Pre-resolve block.next string ID to a direct pointer so the hot
+        // dispatch loop in runBlock can avoid the per-step blocksMap lookup.
+        if (!block.next.empty()) {
+            auto nit = sprite->blocksMap.find(block.next);
+            block.nextBlock = (nit != sprite->blocksMap.end()) ? nit->second : nullptr;
+        } else {
+            block.nextBlock = nullptr;
+        }
 
         auto it = h.find(block.opcode);
         if (it != h.end()) {
@@ -197,9 +203,21 @@ void BlockExecutor::runBlock(Block &block, Sprite *sprite, bool *withoutScreenRe
         if (result == BlockResult::RETURN) return;
 
         if (currentBlock->next.empty()) return;
+#ifdef ENABLE_CACHING
+        // nextBlock is pre-resolved by linkPointers; falls back to map lookup
+        // only if linkPointers hasn't run yet for this block (defensive).
+        if (currentBlock->nextBlock) {
+            currentBlock = currentBlock->nextBlock;
+        } else {
+            auto it = sprite->blocksMap.find(currentBlock->next);
+            if (it == sprite->blocksMap.end() || !it->second) return;
+            currentBlock = it->second;
+        }
+#else
         auto it = sprite->blocksMap.find(currentBlock->next);
         if (it == sprite->blocksMap.end() || !it->second) return;
         currentBlock = it->second;
+#endif
         fromRepeat = false;
     }
 }
@@ -220,18 +238,24 @@ BlockResult BlockExecutor::executeBlock(Block &block, Sprite *sprite, bool *with
 }
 
 void BlockExecutor::executeKeyHats() {
-    for (const auto &key : Input::keyHeldDuration) {
-        if (std::find(Input::inputButtons.begin(), Input::inputButtons.end(), key.first) == Input::inputButtons.end()) {
-            Input::keyHeldDuration[key.first] = 0;
+    // Update durations: increment held keys, reset released ones.
+    // O(n*m) where n=tracked keys, m=currently-held; both are tiny (<10).
+    for (auto &kv : Input::keyHeldDuration) {
+        if (std::find(Input::inputButtons.begin(), Input::inputButtons.end(), kv.first) == Input::inputButtons.end()) {
+            kv.second = 0;
         } else {
-            Input::keyHeldDuration[key.first]++;
+            kv.second++;
         }
     }
 
+    // Insert any newly-pressed keys not yet tracked, and push to inputBuffer.
     for (const auto &key : Input::inputButtons) {
-        if (Input::keyHeldDuration.find(key) == Input::keyHeldDuration.end()) Input::keyHeldDuration[key] = 1;
+        auto durIt = Input::keyHeldDuration.find(key);
+        if (durIt == Input::keyHeldDuration.end()) {
+            durIt = Input::keyHeldDuration.emplace(key, 1).first;
+        }
 
-        if (key == "any" || Input::keyHeldDuration[key] != 1) continue;
+        if (key == "any" || durIt->second != 1) continue;
 
         Input::codePressedBlockOpcodes.clear();
         std::string addKey = (key.find(' ') == std::string::npos) ? key : key.substr(0, key.find(' '));
@@ -240,21 +264,25 @@ void BlockExecutor::executeKeyHats() {
         if (Input::inputBuffer.size() == 101) Input::inputBuffer.erase(Input::inputBuffer.begin());
     }
 
+    // Hot path: only iterate pre-built key-hat indices instead of scanning
+    // every block on every sprite every frame.
     const std::vector<Sprite *> sprToRun = Scratch::sprites;
     for (Sprite *currentSprite : sprToRun) {
-        for (auto &data : currentSprite->blocks) {
-            // TODO: Add a way to register these with macros
-            if (data.opcode == "event_whenkeypressed") {
-                std::string key = Scratch::getFieldValue(data, "KEY_OPTION");
-                if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && Input::keyHeldDuration.find(key)->second == 1) {
-                    if (isScriptRunning(currentSprite, data)) continue;
-                    executor.runBlock(data, currentSprite);
-                }
-            } else if (data.opcode == "makeymakey_whenMakeyKeyPressed") {
-                std::string key = Input::convertToKey(Scratch::getInputValue(data, "KEY", currentSprite), true);
-                if (Input::keyHeldDuration.find(key) != Input::keyHeldDuration.end() && Input::keyHeldDuration.find(key)->second > 0)
-                    executor.runBlock(data, currentSprite);
+        for (Block *blockPtr : currentSprite->keyHatBlocks) {
+            Block &data = *blockPtr;
+            const std::string key = Scratch::getFieldValue(data, "KEY_OPTION");
+            auto it = Input::keyHeldDuration.find(key);
+            if (it != Input::keyHeldDuration.end() && it->second == 1) {
+                if (isScriptRunning(currentSprite, data)) continue;
+                executor.runBlock(data, currentSprite);
             }
+        }
+        for (Block *blockPtr : currentSprite->makeyKeyHatBlocks) {
+            Block &data = *blockPtr;
+            const std::string key = Input::convertToKey(Scratch::getInputValue(data, "KEY", currentSprite), true);
+            auto it = Input::keyHeldDuration.find(key);
+            if (it != Input::keyHeldDuration.end() && it->second > 0)
+                executor.runBlock(data, currentSprite);
         }
     }
     BlockExecutor::runAllBlocksByOpcode("makeymakey_whenCodePressed");
@@ -314,10 +342,7 @@ void BlockExecutor::runRepeatBlocks() {
             const auto &repeatList = blockChain.blocksToRepeat;
             if (repeatList.empty()) continue;
 
-            const std::string toRepeat = repeatList.back();
-            if (toRepeat.empty()) continue;
-
-            Block *const toRun = sprite->blocksMap[toRepeat];
+            Block *const toRun = repeatList.back();
             if (toRun != nullptr) executor.runBlock(*toRun, sprite, &withoutRefresh, true);
         }
     }
@@ -348,8 +373,7 @@ void BlockExecutor::runRepeatsWithoutRefresh(Sprite *sprite, std::string blockCh
     if (sprite->blockChains.find(blockChainID) == sprite->blockChains.end()) return;
 
     while (!sprite->blockChains[blockChainID].blocksToRepeat.empty() && !sprite->toDelete) {
-        const std::string toRepeat = sprite->blockChains[blockChainID].blocksToRepeat.back();
-        Block *toRun = Scratch::findBlock(toRepeat, sprite);
+        Block *toRun = sprite->blockChains[blockChainID].blocksToRepeat.back();
         if (toRun != nullptr)
             executor.runBlock(*toRun, sprite, &withoutRefresh, true);
     }
@@ -816,8 +840,8 @@ Value BlockExecutor::getCustomBlockBooleanValue(std::string valueName, Sprite *s
 
 void BlockExecutor::addToRepeatQueue(Sprite *sprite, Block *block) {
     auto &repeatList = sprite->blockChains[block->blockChainID].blocksToRepeat;
-    if (std::find(repeatList.begin(), repeatList.end(), block->id) == repeatList.end()) {
-        repeatList.push_back(block->id);
+    if (std::find(repeatList.begin(), repeatList.end(), block) == repeatList.end()) {
+        repeatList.push_back(block);
     }
 }
 

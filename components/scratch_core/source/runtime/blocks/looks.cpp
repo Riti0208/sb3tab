@@ -237,14 +237,17 @@ SCRATCH_BLOCK(looks, switchbackdroptoandwait) {
         return BlockResult::CONTINUE;
     }
 
-    if (block.backdropsRun.empty()) {
+    if (!block.backdropsRun || block.backdropsRun->empty()) {
+        if (!block.backdropsRun) {
+            block.backdropsRun = std::make_unique<std::vector<std::pair<Block *, Sprite *>>>();
+        }
         for (Sprite *spr : Scratch::sprites) {
             for (auto &[id, chain] : spr->blockChains) {
                 if (chain.blocksToRepeat.empty()) continue;
 
                 for (auto &chainBlock : chain.blockChain) {
                     if (chainBlock->opcode == "event_whenbackdropswitchesto" && Scratch::getFieldValue(*chainBlock, "BACKDROP") == inputValue.asString()) {
-                        block.backdropsRun.push_back({chainBlock, spr});
+                        block.backdropsRun->push_back({chainBlock, spr});
                         break;
                     }
                 }
@@ -253,7 +256,7 @@ SCRATCH_BLOCK(looks, switchbackdroptoandwait) {
     }
 
     bool shouldEnd = true;
-    for (auto &[blockPtr, spritePtr] : block.backdropsRun) {
+    for (auto &[blockPtr, spritePtr] : *block.backdropsRun) {
         if (spritePtr->toDelete) continue;
         if (!spritePtr->blockChains[blockPtr->blockChainID].blocksToRepeat.empty()) {
             shouldEnd = false;
@@ -264,7 +267,7 @@ SCRATCH_BLOCK(looks, switchbackdroptoandwait) {
     if (!shouldEnd) return BlockResult::RETURN;
 
     BlockExecutor::removeFromRepeatQueue(sprite, &block);
-    block.backdropsRun.clear();
+    block.backdropsRun.reset();
     return BlockResult::CONTINUE;
 }
 
