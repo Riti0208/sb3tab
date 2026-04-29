@@ -799,10 +799,14 @@ static bool load_and_run()
         }
         for (auto &sound : sprite->sounds) {
             if (sound.fullName.empty()) continue;
-            resolve_asset(sound.fullName, [&](const uint8_t *data, size_t len, bool from_sd) {
+            bool ok = resolve_asset(sound.fullName, [&](const uint8_t *data, size_t len, bool from_sd) {
                 SoundPlayer::loadSoundFromMemory(sound.fullName, data, len,
                                                   /*force_copy=*/from_sd);
             });
+            if (!ok) {
+                ESP_LOGW(TAG, "sound asset MISSING: '%s' (sprite='%s')",
+                         sound.fullName.c_str(), sprite->name.c_str());
+            }
         }
     }
 

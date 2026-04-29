@@ -30,6 +30,7 @@ set(SCRATCH_SRCS
     deps/miniz/miniz_zip.c
     deps/miniz/miniz_tinfl.c
     deps/miniz/miniz_tdef.c
+    deps/minimp3/minimp3_impl.c
     deps/ryujs/ryu/d2s.c
 )
 

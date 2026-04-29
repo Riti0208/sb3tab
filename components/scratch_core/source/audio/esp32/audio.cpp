@@ -15,6 +15,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "minimp3/minimp3.h"
 
 static const char *TAG = "esp32_audio";
 
@@ -192,6 +193,128 @@ static PCMSound decode_wav(const uint8_t *data, size_t len, bool force_copy = fa
     pcm.volume = 1.0f;
 
     return pcm;
+}
+
+// Decode an MP3 stream to 16-bit mono PCM at the source's native sample rate.
+// Sample-rate conversion + pitch shift are handled by the mixer's existing
+// linear-interpolation loop, so we keep the source rate here. Stereo input is
+// downmixed to mono in-place. ID3v2 tags at the start are skipped automatically
+// by minimp3 via its sync search.
+//
+// Two-pass design: pass 1 walks every frame to compute the exact sample count,
+// then we allocate one PSRAM buffer of exactly that size. A naive single-pass
+// "guess + grow" approach blows up on long BGM clips because PSRAM is heavily
+// fragmented (largest contiguous block is much smaller than total free), and a
+// realloc that has to copy a multi-MB buffer to a fresh region temporarily
+// needs old+new bytes simultaneously — which often won't fit even though the
+// final result would. Pass 1 is cheap relative to pass 2 because we discard
+// the PCM into a scratch frame buffer and skip the per-sample mono downmix.
+static bool decode_mp3_to_pcm(const uint8_t *data, size_t len, PCMSound &pcm) {
+    int16_t frame_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+
+    // Pass 1: count exact total samples and capture stream metadata.
+    mp3dec_t mp3d;
+    mp3dec_init(&mp3d);
+    size_t total = 0;
+    int sample_rate = 0;
+    int channels = 0;
+    int bitrate_kbps = 0;
+    int layer = 0;
+    {
+        const uint8_t *p = data;
+        size_t remain = len;
+        while (remain > 0) {
+            mp3dec_frame_info_t info = {};
+            int samples_per_ch = mp3dec_decode_frame(&mp3d, p, (int)remain, frame_pcm, &info);
+            if (info.frame_bytes <= 0) break;
+            p += info.frame_bytes;
+            remain = ((size_t)info.frame_bytes <= remain) ? remain - (size_t)info.frame_bytes : 0;
+            if (samples_per_ch <= 0) continue;
+            if (sample_rate == 0) {
+                sample_rate = info.hz;
+                channels = info.channels;
+                bitrate_kbps = info.bitrate_kbps;
+                layer = info.layer;
+            }
+            total += (size_t)samples_per_ch;
+        }
+    }
+
+    if (total == 0 || sample_rate == 0) {
+        ESP_LOGE(TAG, "decode_mp3: no frames decoded (len=%zu)", len);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "MP3: %dHz %dch %dkbps layer%d, %zu samples → %.2f MB PCM",
+             sample_rate, channels, bitrate_kbps, layer, total,
+             (double)(total * sizeof(int16_t)) / (1024.0 * 1024.0));
+
+    int16_t *out = (int16_t *)heap_caps_malloc(total * sizeof(int16_t),
+                                                MALLOC_CAP_SPIRAM);
+    if (!out) {
+        ESP_LOGE(TAG, "decode_mp3: alloc failed for %zu samples (PSRAM free=%u largest=%u)",
+                 total,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        return false;
+    }
+
+    // Pass 2: re-decode with state reset, write into the exact-sized buffer.
+    mp3dec_init(&mp3d);
+    size_t written = 0;
+    {
+        const uint8_t *p = data;
+        size_t remain = len;
+        while (remain > 0 && written < total) {
+            mp3dec_frame_info_t info = {};
+            int samples_per_ch = mp3dec_decode_frame(&mp3d, p, (int)remain, frame_pcm, &info);
+            if (info.frame_bytes <= 0) break;
+            p += info.frame_bytes;
+            remain = ((size_t)info.frame_bytes <= remain) ? remain - (size_t)info.frame_bytes : 0;
+            if (samples_per_ch <= 0) continue;
+
+            size_t to_copy = (size_t)samples_per_ch;
+            if (written + to_copy > total) to_copy = total - written;
+
+            if (info.channels == 1) {
+                memcpy(out + written, frame_pcm, to_copy * sizeof(int16_t));
+            } else {
+                for (size_t i = 0; i < to_copy; i++) {
+                    int32_t l = frame_pcm[i * 2];
+                    int32_t r = frame_pcm[i * 2 + 1];
+                    out[written + i] = (int16_t)((l + r) / 2);
+                }
+            }
+            written += to_copy;
+        }
+    }
+
+    pcm.samples = out;
+    pcm.samples_owned = true;
+    pcm.num_samples = written;
+    pcm.sample_rate = sample_rate;
+    pcm.loaded = true;
+    pcm.volume = 1.0f;
+    return true;
+}
+
+// Detect MP3 by signature: ID3v2 tag prefix or an MPEG audio sync word
+// (11 set bits at the top of the first two bytes).
+static bool looks_like_mp3(const uint8_t *data, size_t len) {
+    if (len < 4) return false;
+    if (data[0] == 'I' && data[1] == 'D' && data[2] == '3') return true;
+    if (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) return true;
+    return false;
+}
+
+// Top-level dispatcher: route to MP3 or WAV based on signature.
+static PCMSound decode_audio(const uint8_t *data, size_t len, bool force_copy = false) {
+    if (looks_like_mp3(data, len)) {
+        PCMSound pcm = {};
+        decode_mp3_to_pcm(data, len, pcm);
+        return pcm;
+    }
+    return decode_wav(data, len, force_copy);
 }
 
 // HTTP download for sounds from Scratch CDN
@@ -434,8 +557,8 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
         return;
     }
 
-    // Decode WAV to PCM
-    PCMSound pcm = decode_wav(raw.data, raw.len);
+    // Decode WAV or MP3 to PCM
+    PCMSound pcm = decode_audio(raw.data, raw.len);
     heap_caps_free(raw.data);
 
     if (!pcm.loaded) {
@@ -486,7 +609,7 @@ bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t 
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
-    PCMSound pcm = decode_wav(data, len, force_copy);
+    PCMSound pcm = decode_audio(data, len, force_copy);
     if (!pcm.loaded) {
         ESP_LOGE(TAG, "Failed to decode sound from memory: %s — marking as failed", soundId.c_str());
         if (xSemaphoreTake(s_audio_mutex, portMAX_DELAY) == pdTRUE) {
