@@ -33,6 +33,7 @@
 
 // scratch_core: read the project's gamepad→key auto-mapping table.
 #include <input.hpp>
+#include <audio.hpp>
 
 // Embedded NotoSansJP TTF (linked via EMBED_FILES in scratch_core)
 extern "C" const uint8_t noto_sans_ttf_start[] asm("_binary_NotoSansJP_Medium_subset_ttf_start");
@@ -43,6 +44,37 @@ extern "C" const lv_image_dsc_t ui_logo;
 extern "C" const lv_image_dsc_t ui_icon_play;
 extern "C" const lv_image_dsc_t ui_icon_new;
 extern "C" const lv_image_dsc_t ui_icon_settings;
+
+// Embedded UI sound effects (16bit mono 48kHz WAV via EMBED_FILES)
+extern "C" const uint8_t cursor_wav_start[] asm("_binary_cursor_wav_start");
+extern "C" const uint8_t cursor_wav_end[]   asm("_binary_cursor_wav_end");
+extern "C" const uint8_t select_wav_start[] asm("_binary_select_wav_start");
+extern "C" const uint8_t select_wav_end[]   asm("_binary_select_wav_end");
+extern "C" const uint8_t cancel_wav_start[] asm("_binary_cancel_wav_start");
+extern "C" const uint8_t cancel_wav_end[]   asm("_binary_cancel_wav_end");
+
+static void load_ui_sounds() {
+    SoundPlayer::loadSoundFromMemory("ui_cursor", cursor_wav_start,
+                                     cursor_wav_end - cursor_wav_start);
+    SoundPlayer::loadSoundFromMemory("ui_select", select_wav_start,
+                                     select_wav_end - select_wav_start);
+    SoundPlayer::loadSoundFromMemory("ui_cancel", cancel_wav_start,
+                                     cancel_wav_end - cancel_wav_start);
+}
+
+// True between when the user presses a nav direction and when LVGL processes
+// the resulting focus change. Used so the focus_cb only chirps on real
+// user-driven moves — programmatic focus during screen build stays silent.
+static volatile bool s_user_nav_pending = false;
+
+static void ui_group_focus_cb(lv_group_t * /*group*/) {
+    // s_user_nav_pending is set strictly by indev_read_cb whenever a nav
+    // direction is held this poll, so we don't clear it here — auto-repeat
+    // navigation needs the flag to stay true across consecutive focus moves.
+    if (s_user_nav_pending) {
+        SoundPlayer::playSound("ui_cursor");
+    }
+}
 
 // Pick the closest pre-baked Montserrat font for a desired pixel size.
 // Used as a fallback for the JP TTF (NotoSansJP subset doesn't include LV_SYMBOL_*
@@ -279,16 +311,49 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
     // Slider focused → LEFT/RIGHT directly adjusts value (no edit-mode needed)
     bool horiz_adjusts = slider_focused || editing;
-    if (b & InputDev::DPAD_UP) {
+
+    // Detect whether the focused widget lives in a horizontal or vertical
+    // layout, so UP/DOWN don't move sideways on a horizontal row of tiles
+    // (and vice versa). Walk up from the focused widget to the closest
+    // ancestor that contains ≥2 group members and has a flex flow set.
+    enum { AXIS_NONE, AXIS_HOR, AXIS_VER } axis = AXIS_NONE;
+    if (s_group) {
+        lv_obj_t *focused = lv_group_get_focused(s_group);
+        uint32_t gcount = lv_group_get_obj_count(s_group);
+        for (lv_obj_t *anc = focused ? lv_obj_get_parent(focused) : nullptr;
+             anc != nullptr; anc = lv_obj_get_parent(anc)) {
+            uint32_t members = 0;
+            for (uint32_t i = 0; i < gcount && members < 2; i++) {
+                lv_obj_t *o = lv_group_get_obj_by_index(s_group, i);
+                for (lv_obj_t *p = o; p != nullptr; p = lv_obj_get_parent(p)) {
+                    if (p == anc) { members++; break; }
+                }
+            }
+            if (members < 2) continue;
+            lv_flex_flow_t flow = (lv_flex_flow_t)lv_obj_get_style_flex_flow(anc, 0);
+            // Bit 0 (LV_FLEX_COLUMN) distinguishes column from row. If flex
+            // isn't configured on this ancestor at all, leave axis = NONE.
+            if (lv_obj_get_style_layout(anc, 0) == LV_LAYOUT_FLEX) {
+                axis = (flow & LV_FLEX_COLUMN) ? AXIS_VER : AXIS_HOR;
+            }
+            break;
+        }
+    }
+    // Suppress the "wrong axis" d-pad keys so a horizontal row doesn't move
+    // on UP/DOWN, and a vertical column doesn't move on LEFT/RIGHT.
+    bool suppress_vert = (axis == AXIS_HOR);
+    bool suppress_horiz_nav = (axis == AXIS_VER);
+
+    if ((b & InputDev::DPAD_UP) && (dropdown_open || !suppress_vert)) {
         data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & InputDev::DPAD_DOWN) {
+    } else if ((b & InputDev::DPAD_DOWN) && (dropdown_open || !suppress_vert)) {
         data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & InputDev::DPAD_LEFT) {
+    } else if ((b & InputDev::DPAD_LEFT) && (horiz_adjusts || !suppress_horiz_nav)) {
         data->key = horiz_adjusts ? LV_KEY_LEFT : LV_KEY_PREV;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & InputDev::DPAD_RIGHT) {
+    } else if ((b & InputDev::DPAD_RIGHT) && (horiz_adjusts || !suppress_horiz_nav)) {
         data->key = horiz_adjusts ? LV_KEY_RIGHT : LV_KEY_NEXT;
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (b & InputDev::A) {
@@ -302,20 +367,47 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     // Left stick fallback (with deadzone)
     if (data->key == 0) {
         const int16_t DZ = 16000;
-        if (gs.ly > DZ) {
+        if (gs.ly > DZ && (dropdown_open || !suppress_vert)) {
             data->key = dropdown_open ? LV_KEY_UP : LV_KEY_PREV;
             data->state = LV_INDEV_STATE_PRESSED;
-        } else if (gs.ly < -DZ) {
+        } else if (gs.ly < -DZ && (dropdown_open || !suppress_vert)) {
             data->key = dropdown_open ? LV_KEY_DOWN : LV_KEY_NEXT;
             data->state = LV_INDEV_STATE_PRESSED;
-        } else if (gs.lx < -DZ) {
+        } else if (gs.lx < -DZ && (horiz_adjusts || !suppress_horiz_nav)) {
             data->key = horiz_adjusts ? LV_KEY_LEFT : LV_KEY_PREV;
             data->state = LV_INDEV_STATE_PRESSED;
-        } else if (gs.lx > DZ) {
+        } else if (gs.lx > DZ && (horiz_adjusts || !suppress_horiz_nav)) {
             data->key = horiz_adjusts ? LV_KEY_RIGHT : LV_KEY_NEXT;
             data->state = LV_INDEV_STATE_PRESSED;
         }
     }
+
+    // UI sound triggers — only when LVGL UI is actually on screen.
+    // - Cursor: handled separately via lv_group_set_focus_cb (s_user_nav_pending
+    //   flag distinguishes user-driven focus changes from programmatic ones).
+    // - Select: rising edge of A. Almost always activates something.
+    // - Cancel: explicit calls at the actual "go back" code paths, not here —
+    //   pressing B on the main menu (no back target) shouldn't make a sound.
+    static uint32_t s_prev_btn = 0;
+    uint32_t edge = b & ~s_prev_btn;
+    if (!s_flush_disabled) {
+        constexpr uint32_t NAV_MASK = InputDev::DPAD_UP | InputDev::DPAD_DOWN
+                                    | InputDev::DPAD_LEFT | InputDev::DPAD_RIGHT;
+        bool nav_held = (b & NAV_MASK) != 0
+                     || std::abs(gs.lx) > 16000 || std::abs(gs.ly) > 16000;
+        // Strict: only true while a nav direction is actually held *this poll*.
+        // Programmatic focus changes (screen build, lv_group_focus_obj) happen
+        // when nothing is held → focus_cb sees flag=false → stays silent.
+        s_user_nav_pending = nav_held;
+        // Select only when something focusable is actually receiving the press —
+        // loading/status screens have no focused widget, so they stay silent.
+        if ((edge & InputDev::A) && s_group && lv_group_get_focused(s_group)) {
+            SoundPlayer::playSound("ui_select");
+        }
+    } else {
+        s_user_nav_pending = false;
+    }
+    s_prev_btn = b;
 }
 
 // ============================================================
@@ -746,6 +838,7 @@ static void on_brightness_slider(lv_event_t *e) {
     lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
     int step = lv_slider_get_value(slider);
     if (step < 1) step = 1;
+    if (step != s_brightness_step) SoundPlayer::playSound("ui_select");
     s_brightness_step = step;
     int pct = STEP_TO_PCT(step);
     dsi_backlight_set(pct);
@@ -759,6 +852,7 @@ static void on_volume_slider(lv_event_t *e) {
     lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
     int step = lv_slider_get_value(slider);
     if (step < 0) step = 0;
+    if (step != s_volume_step) SoundPlayer::playSound("ui_select");
     s_volume_step = step;
     s_muted = (step == 0);
     es8388_set_volume(step, VOLUME_MAX_STEP);
@@ -1493,12 +1587,17 @@ void ui_init(esp_lcd_panel_handle_t panel)
     lv_group_set_default(s_group);
     // Default: PREV/NEXT navigate, ENTER enters edit mode for sliders
     lv_indev_set_group(s_indev, s_group);
+    // Cursor sfx fires here on every focus move — gated by s_user_nav_pending
+    lv_group_set_focus_cb(s_group, ui_group_focus_cb);
 
     // Mutex for LVGL thread safety
     s_lvgl_mutex = xSemaphoreCreateMutex();
 
     // Start LVGL handler task
     xTaskCreatePinnedToCore(lvgl_task_fn, "lvgl", 16384, nullptr, 4, &s_lvgl_task, 1);
+
+    // Preload UI sound effects (cursor/select/cancel)
+    load_ui_sounds();
 
     ESP_LOGI(TAG, "LVGL UI initialized (landscape %dx%d via 270 rotation)",
              DSI_LANDSCAPE_W, DSI_LANDSCAPE_H);
@@ -1694,6 +1793,7 @@ MenuAction ui_menu_run()
             bool b_now = (InputDev::get().buttons & InputDev::B) != 0;
             if (b_now && !s_b_prev) {
                 if (s_state == MenuState::GAME_LIST || s_state == MenuState::SETTINGS) {
+                    SoundPlayer::playSound("ui_cancel");
                     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
                     build_main_menu();
                     show_screen(s_scr_main);
@@ -1778,6 +1878,7 @@ bool ui_show_exit_confirm()
     while (s_confirm_result < 0) {
         InputDev::State gs = InputDev::get();
         if (gs.buttons & InputDev::B) {
+            SoundPlayer::playSound("ui_cancel");
             while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
             s_confirm_result = 0;
         }
@@ -1812,6 +1913,7 @@ void ui_show_button_map()
         if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
+    SoundPlayer::playSound("ui_cancel");
     while (InputDev::get().buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -1926,6 +2028,7 @@ bool ui_show_confirm(const char *title, const char *detail)
         // Also check raw input for B = cancel
         InputDev::State gs = InputDev::get();
         if (gs.buttons & InputDev::B) {
+            SoundPlayer::playSound("ui_cancel");
             while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
             s_confirm_result = 0;
         }

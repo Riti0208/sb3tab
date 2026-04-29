@@ -1040,6 +1040,7 @@ static void game_overlay_check()
     // Start → exit confirm
     if (s.buttons & InputDev::START) {
         while (InputDev::get().buttons & InputDev::START) vTaskDelay(pdMS_TO_TICKS(20));
+        SoundPlayer::playSound("ui_select");
 
         // Let the runtime finish the in-flight frame, then freeze display + audio
         // (mixer keeps draining DMA but writes silence — sounds resume on dismiss)
@@ -1058,6 +1059,7 @@ static void game_overlay_check()
     // Back/Select → show button map
     if (s.buttons & InputDev::BACK) {
         while (InputDev::get().buttons & InputDev::BACK) vTaskDelay(pdMS_TO_TICKS(20));
+        SoundPlayer::playSound("ui_select");
         scratch_paused = true;
         audio_mixer_set_suspended(true);
         vTaskDelay(pdMS_TO_TICKS(50));

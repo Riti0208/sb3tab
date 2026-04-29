@@ -253,19 +253,15 @@ static void mixer_task(void *param) {
     while (true) {
         memset(out_buf, 0, buf_samples * 2 * sizeof(int16_t));
         bool any_playing = false;
-
-        // Suspended (overlay modal active): write silence without advancing
-        // any sound's frac_pos, so resume picks up from the same instant.
-        if (s_audio_suspended) {
-            size_t bytes_written = 0;
-            i2s_channel_write(s_i2s_tx, out_buf, buf_samples * 2 * sizeof(int16_t),
-                              &bytes_written, portMAX_DELAY);
-            continue;
-        }
+        bool suspended = s_audio_suspended;
 
         if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             for (auto &[id, snd] : s_sounds) {
                 if (!snd.playing || !snd.loaded || !snd.samples) continue;
+                // While suspended, freeze project sounds (don't advance frac_pos
+                // so resume picks up from the same instant) but let "ui_*" UI
+                // effect sounds play through — overlays still need feedback.
+                if (suspended && id.compare(0, 3, "ui_") != 0) continue;
                 any_playing = true;
 
                 // Sample-rate conversion is folded into this loop: advance the source
@@ -683,20 +679,27 @@ void SoundPlayer::cleanupAudio() {
     if (!s_audio_mutex) return;
     if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         size_t freed_count = 0, freed_bytes = 0, borrowed = 0;
-        for (auto &[id, snd] : s_sounds) {
-            snd.playing = false;
-            if (snd.samples) {
-                if (snd.samples_owned) {
-                    freed_bytes += snd.num_samples * sizeof(int16_t);
-                    heap_caps_free(snd.samples);
+        // Preserve "ui_*" sounds across game exits — those belong to the menu UI,
+        // not the Scratch project, and re-loading them every game would be wasteful.
+        for (auto it = s_sounds.begin(); it != s_sounds.end(); ) {
+            if (it->first.compare(0, 3, "ui_") == 0) {
+                it->second.playing = false;
+                ++it;
+                continue;
+            }
+            it->second.playing = false;
+            if (it->second.samples) {
+                if (it->second.samples_owned) {
+                    freed_bytes += it->second.num_samples * sizeof(int16_t);
+                    heap_caps_free(it->second.samples);
                     freed_count++;
                 } else {
                     borrowed++;
                 }
-                snd.samples = nullptr;
+                it->second.samples = nullptr;
             }
+            it = s_sounds.erase(it);
         }
-        s_sounds.clear();
         xSemaphoreGive(s_audio_mutex);
         ESP_LOGI(TAG, "cleanupAudio: freed %zu owned (%zu bytes), %zu borrowed dropped, psram_free=%u largest=%u",
                  freed_count, freed_bytes, borrowed,

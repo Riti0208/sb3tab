@@ -7,6 +7,10 @@ idf_component_register(
          "assets_gen/ui_icon_play.c"
          "assets_gen/ui_icon_new.c"
          "assets_gen/ui_icon_settings.c"
+    EMBED_FILES
+         "assets/cursor.wav"
+         "assets/select.wav"
+         "assets/cancel.wav"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
