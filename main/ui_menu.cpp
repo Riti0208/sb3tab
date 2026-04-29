@@ -359,10 +359,12 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     } else if (b & InputDev::A) {
         data->key = LV_KEY_ENTER;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else if (b & InputDev::B) {
-        data->key = LV_KEY_ESC;
-        data->state = LV_INDEV_STATE_PRESSED;
     }
+    // B is handled by the menu loop only (closes dropdown OR pops screen).
+    // KEYPAD indev doesn't use editing mode (LVGL forcibly disables it in
+    // lv_indev_keypad_proc), so we don't need ESC for edit-mode exit.
+    // Sending ESC here would race the menu loop and either close the
+    // dropdown twice or let the back-nav fire wrongly.
 
     // Left stick fallback (with deadzone)
     if (data->key == 0) {
@@ -629,6 +631,10 @@ static lv_obj_t *create_settings_card(lv_obj_t *parent, const char *label_text)
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(content, 16, 0);
+    // Inset children by 10px horizontally so the slider/dropdown's focused
+    // orange outline (pad 6 + width 4 = 10px outside the bounding box) fits
+    // within content's clip rect — otherwise the left side gets clipped.
+    lv_obj_set_style_pad_hor(content, 10, 0);
     return content;
 }
 
@@ -1034,7 +1040,9 @@ static void build_settings()
         lv_dropdown_set_options_static(dd, dd_opts);
         lv_dropdown_set_selected(dd, lang_to_index(lang_get()));
         lv_obj_set_flex_grow(dd, 1);
-        lv_obj_set_height(dd, 56);
+        // 40px (not 56) so the focused outline (10px outside) fits within
+        // the card's 62px content area: (62-40)/2 = 11px breathing room each.
+        lv_obj_set_height(dd, 40);
         lv_font_t *jp = get_jp_font(22);
         lv_obj_set_style_text_font(dd, jp ? jp : &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(dd, lv_color_hex(SCRATCH_TEXT), 0);
@@ -1787,12 +1795,30 @@ MenuAction ui_menu_run()
             break;
         }
 
-        // Global B = back (one screen up). Confirm/QR screens handle B themselves.
+        // Global B handler. Confirm/QR screens handle B themselves.
+        // Priority: focused open dropdown → close it; otherwise → back one screen.
+        // indev no longer sends ESC, so this branch is the sole owner of B.
         {
             static bool s_b_prev = false;
             bool b_now = (InputDev::get().buttons & InputDev::B) != 0;
             if (b_now && !s_b_prev) {
-                if (s_state == MenuState::GAME_LIST || s_state == MenuState::SETTINGS) {
+                bool consumed = false;
+                if (s_state == MenuState::SETTINGS && s_group) {
+                    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+                    lv_obj_t *focused = lv_group_get_focused(s_group);
+                    if (focused && lv_obj_check_type(focused, &lv_dropdown_class)
+                        && lv_dropdown_is_open(focused)) {
+                        lv_dropdown_close(focused);
+                        consumed = true;
+                    }
+                    xSemaphoreGive(s_lvgl_mutex);
+                    if (consumed) {
+                        SoundPlayer::playSound("ui_cancel");
+                        while (InputDev::get().buttons & InputDev::B) vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+                }
+                if (!consumed &&
+                    (s_state == MenuState::GAME_LIST || s_state == MenuState::SETTINGS)) {
                     SoundPlayer::playSound("ui_cancel");
                     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
                     build_main_menu();
