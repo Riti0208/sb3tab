@@ -30,7 +30,11 @@ static const char *TAG = "esp32_audio";
 #define I2S_DMA_BUF_LEN    1024
 
 struct PCMSound {
-    int16_t *samples;       // PCM 16-bit mono in PSRAM
+    int16_t *samples;       // PCM 16-bit mono — owned heap buffer OR borrowed
+                            // pointer into the caller's source buffer (see
+                            // samples_owned). Never written to by the mixer.
+    bool samples_owned;     // true → heap_caps_free(samples) on cleanup;
+                            // false → samples points into g_assets, do NOT free
     size_t num_samples;
     int sample_rate;
     bool loaded;
@@ -40,7 +44,10 @@ struct PCMSound {
     float volume;           // 0.0 - 1.0
     float pitch;            // Scratch pitch value (0=normal, +10=octave up, -10=octave down)
     float pan;              // -100 (full left) .. 0 (center) .. +100 (full right)
-    float frac_pos;         // fractional playback position for pitch resampling
+    double frac_pos;        // fractional playback position for SRC + pitch.
+                            // Must be double: at ~2M source samples a float's
+                            // 24-bit mantissa quantises the fractional part to
+                            // ~1/8 sample, causing audible pitch wobble on long WAVs.
 };
 
 static std::unordered_map<std::string, PCMSound> s_sounds;
@@ -50,6 +57,7 @@ static i2s_chan_handle_t s_i2s_tx = nullptr;
 static SemaphoreHandle_t s_audio_mutex = nullptr;
 static TaskHandle_t s_mixer_task = nullptr;
 static bool s_audio_init = false;
+static volatile bool s_audio_suspended = false;  // pause flag for in-game overlays
 
 // WAV header parser
 struct WavHeader {
@@ -122,7 +130,17 @@ static void decode_wav_raw(const uint8_t *data, const WavHeader &wav,
     }
 }
 
-// Convert WAV data to 16-bit mono PCM resampled to AUDIO_SAMPLE_RATE with linear interpolation
+// Decode WAV to 16-bit mono PCM at the WAV's original sample rate.
+// Sample-rate conversion is folded into the mixer's existing linear-interpolation
+// loop (rate = src_rate / 48000 × pitch).
+//
+// Fast path (16-bit mono): point pcm.samples directly at the source buffer's
+// data section — no allocation, no copy. Critical for the 4 MB Ninja BGM where
+// duplicating into PSRAM doubles peak usage and fails on the 2nd game load due
+// to fragmentation. Caller MUST keep `data` alive for the sound's lifetime.
+// In our flow that's g_assets, which is freed AFTER cleanupAudio.
+//
+// Slow path (8-bit, multi-channel, etc.): allocate + decode to mono int16.
 static PCMSound decode_wav(const uint8_t *data, size_t len) {
     PCMSound pcm = {};
     WavHeader wav = parse_wav(data, len);
@@ -135,47 +153,30 @@ static PCMSound decode_wav(const uint8_t *data, size_t len) {
              wav.sample_rate, wav.bits_per_sample, wav.num_channels, wav.data_size);
 
     int src_samples = wav.data_size / (wav.bits_per_sample / 8) / wav.num_channels;
-
-    // First decode to raw mono at original rate
-    int16_t *raw = (int16_t *)heap_caps_malloc(src_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    if (!raw) {
-        ESP_LOGE(TAG, "Failed to alloc raw %d samples", src_samples);
+    if (src_samples <= 0) {
+        ESP_LOGE(TAG, "WAV has no samples");
         return pcm;
     }
-    decode_wav_raw(data, wav, raw, src_samples);
 
-    // Resample to AUDIO_SAMPLE_RATE with linear interpolation
-    if (wav.sample_rate == AUDIO_SAMPLE_RATE) {
-        // No resampling needed
-        pcm.samples = raw;
-        pcm.num_samples = src_samples;
+    if (wav.bits_per_sample == 16 && wav.num_channels == 1) {
+        // Borrow source buffer — no PSRAM cost.
+        pcm.samples = (int16_t *)(data + wav.data_offset);
+        pcm.samples_owned = false;
     } else {
-        double ratio = (double)AUDIO_SAMPLE_RATE / wav.sample_rate;
-        int dst_samples = (int)(src_samples * ratio);
-
-        pcm.samples = (int16_t *)heap_caps_malloc(dst_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        pcm.samples = (int16_t *)heap_caps_malloc(src_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
         if (!pcm.samples) {
-            ESP_LOGE(TAG, "Failed to alloc resampled %d samples", dst_samples);
-            heap_caps_free(raw);
+            ESP_LOGE(TAG, "Failed to alloc %d samples (%d bytes) — PSRAM free=%u largest=%u",
+                     src_samples, src_samples * 2,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
             return pcm;
         }
-
-        for (int i = 0; i < dst_samples; i++) {
-            double src_pos = i / ratio;
-            int idx0 = (int)src_pos;
-            int idx1 = idx0 + 1;
-            if (idx0 >= src_samples) idx0 = src_samples - 1;
-            if (idx1 >= src_samples) idx1 = src_samples - 1;
-            float frac = (float)(src_pos - idx0);
-
-            pcm.samples[i] = (int16_t)(raw[idx0] * (1.0f - frac) + raw[idx1] * frac);
-        }
-
-        pcm.num_samples = dst_samples;
-        heap_caps_free(raw);
+        decode_wav_raw(data, wav, pcm.samples, src_samples);
+        pcm.samples_owned = true;
     }
 
-    pcm.sample_rate = AUDIO_SAMPLE_RATE;
+    pcm.num_samples = src_samples;
+    pcm.sample_rate = wav.sample_rate;
     pcm.loaded = true;
     pcm.volume = 1.0f;
 
@@ -253,14 +254,26 @@ static void mixer_task(void *param) {
         memset(out_buf, 0, buf_samples * 2 * sizeof(int16_t));
         bool any_playing = false;
 
+        // Suspended (overlay modal active): write silence without advancing
+        // any sound's frac_pos, so resume picks up from the same instant.
+        if (s_audio_suspended) {
+            size_t bytes_written = 0;
+            i2s_channel_write(s_i2s_tx, out_buf, buf_samples * 2 * sizeof(int16_t),
+                              &bytes_written, portMAX_DELAY);
+            continue;
+        }
+
         if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             for (auto &[id, snd] : s_sounds) {
                 if (!snd.playing || !snd.loaded || !snd.samples) continue;
                 any_playing = true;
 
-                // All sounds are pre-resampled to AUDIO_SAMPLE_RATE in decode_wav
-                // Apply pitch: rate = 2^(pitch/10), default 1.0
-                float rate = (snd.pitch == 0.0f) ? 1.0f : powf(2.0f, snd.pitch / 10.0f);
+                // Sample-rate conversion is folded into this loop: advance the source
+                // index by (src_rate / output_rate) per output sample, then multiply by
+                // the Scratch pitch factor. linear interpolation below handles fractional
+                // positions for both SRC and pitch shift in one pass.
+                double rate = (double)snd.sample_rate / (double)AUDIO_SAMPLE_RATE;
+                if (snd.pitch != 0.0f) rate *= pow(2.0, snd.pitch / 10.0);
 
                 // Compute per-channel gain from pan [-100..100]
                 // pan=-100: left=1, right=0; pan=0: left=1, right=1; pan=100: left=0, right=1
@@ -274,9 +287,9 @@ static void mixer_task(void *param) {
                 }
 
                 for (int i = 0; i < buf_samples; i++) {
-                    if (snd.frac_pos >= (float)snd.num_samples) {
+                    if (snd.frac_pos >= (double)snd.num_samples) {
                         snd.playing = false;
-                        snd.frac_pos = 0.0f;
+                        snd.frac_pos = 0.0;
                         break;
                     }
 
@@ -284,7 +297,7 @@ static void mixer_task(void *param) {
                     size_t idx0 = (size_t)snd.frac_pos;
                     size_t idx1 = idx0 + 1;
                     if (idx1 >= snd.num_samples) idx1 = snd.num_samples - 1;
-                    float frac = snd.frac_pos - (float)idx0;
+                    float frac = (float)(snd.frac_pos - (double)idx0);
                     float interpolated = snd.samples[idx0] * (1.0f - frac) + snd.samples[idx1] * frac;
 
                     int32_t base = (int32_t)(interpolated * snd.volume);
@@ -447,6 +460,24 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
 bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len) {
     if (!init()) return false;
 
+    // Dedup: many sprites in a project share the same sound id (the Ninja demo
+    // calls us 8× for the same 83a9787... clip). Skip re-decoding when we
+    // already have a result — loaded or permanently failed.
+    if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        auto it = s_sounds.find(soundId);
+        if (it != s_sounds.end() && (it->second.loaded || it->second.failed)) {
+            bool ok = it->second.loaded;
+            xSemaphoreGive(s_audio_mutex);
+            return ok;
+        }
+        xSemaphoreGive(s_audio_mutex);
+    }
+
+    ESP_LOGI(TAG, "loadSoundFromMemory: %s len=%zu psram_free=%u largest=%u",
+             soundId.c_str(), len,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+
     PCMSound pcm = decode_wav(data, len);
     if (!pcm.loaded) {
         ESP_LOGE(TAG, "Failed to decode sound from memory: %s — marking as failed", soundId.c_str());
@@ -461,9 +492,15 @@ bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t 
 
     ESP_LOGI(TAG, "Loaded sound from memory: %s (%zu samples)", soundId.c_str(), pcm.num_samples);
 
-    if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         s_sounds[soundId] = pcm;
         xSemaphoreGive(s_audio_mutex);
+    } else {
+        // Mutex contention — leak rather than store half-state. Should be rare.
+        ESP_LOGE(TAG, "loadSoundFromMemory: mutex timeout for %s, leaking %zu samples",
+                 soundId.c_str(), pcm.num_samples);
+        heap_caps_free(pcm.samples);
+        return false;
     }
     return true;
 }
@@ -565,7 +602,7 @@ void SoundPlayer::setMusicPosition(double position, const std::string &soundId) 
             it->second.play_pos = (size_t)(position * it->second.sample_rate);
             if (it->second.play_pos >= it->second.num_samples)
                 it->second.play_pos = 0;
-            it->second.frac_pos = (float)it->second.play_pos;
+            it->second.frac_pos = (double)it->second.play_pos;
         }
         xSemaphoreGive(s_audio_mutex);
     }
@@ -629,7 +666,7 @@ void SoundPlayer::freeAudio(const std::string &soundId) {
     if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         auto it = s_sounds.find(soundId);
         if (it != s_sounds.end()) {
-            if (it->second.samples) {
+            if (it->second.samples && it->second.samples_owned) {
                 heap_caps_free(it->second.samples);
             }
             s_sounds.erase(it);
@@ -644,17 +681,36 @@ void SoundPlayer::flushAudio() {
 
 void SoundPlayer::cleanupAudio() {
     if (!s_audio_mutex) return;
-    if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    if (xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        size_t freed_count = 0, freed_bytes = 0, borrowed = 0;
         for (auto &[id, snd] : s_sounds) {
             snd.playing = false;
             if (snd.samples) {
-                heap_caps_free(snd.samples);
+                if (snd.samples_owned) {
+                    freed_bytes += snd.num_samples * sizeof(int16_t);
+                    heap_caps_free(snd.samples);
+                    freed_count++;
+                } else {
+                    borrowed++;
+                }
                 snd.samples = nullptr;
             }
         }
         s_sounds.clear();
         xSemaphoreGive(s_audio_mutex);
+        ESP_LOGI(TAG, "cleanupAudio: freed %zu owned (%zu bytes), %zu borrowed dropped, psram_free=%u largest=%u",
+                 freed_count, freed_bytes, borrowed,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    } else {
+        ESP_LOGE(TAG, "cleanupAudio: mutex timeout — sounds NOT freed");
     }
+}
+
+// Exposed to main.cpp via es8388_audio.h. Kept off the SoundPlayer class so the
+// shared audio.hpp doesn't grow esp32-specific plumbing.
+void audio_mixer_set_suspended(bool suspended) {
+    s_audio_suspended = suspended;
 }
 
 void SoundPlayer::deinit() {

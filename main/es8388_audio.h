@@ -13,3 +13,8 @@ void es8388_set_mute(bool mute);
 // Set volume level. level=0 → mute, level=1..max_level → mapped to DAC digital
 // volume from quietest to 0dB. Default max_level=5 (kid-friendly stepper).
 void es8388_set_volume(int level, int max_level = 5);
+
+// Pause/resume the audio mixer. While suspended the mixer outputs silence to
+// I2S without advancing playback positions, so dismissing the overlay resumes
+// each sound from where it left off.
+void audio_mixer_set_suspended(bool suspended);

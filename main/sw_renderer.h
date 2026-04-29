@@ -101,6 +101,11 @@ public:
     // Notify a dirty region was drawn (called internally and by external renderers)
     void addDirtyRect(int x, int y, int w, int h);
 
+    // Free all rasterized costume RGBAs and the row-set masks. Called between
+    // games so the freshly-decoded ~10 MB of SVG bitmaps don't fragment PSRAM
+    // and starve the next project's large WAV/asset allocations.
+    void clearCostumes();
+
 private:
     uint8_t *fb[2];   // Double-buffered STAGE_W * STAGE_H * 3 (RGB888)
     int currentFb = 0;

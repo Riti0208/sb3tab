@@ -967,10 +967,15 @@ static void sd_asset_load_cb(const char *name, const uint8_t *data, size_t len, 
 {
     // Copy asset data (callback data is temporary)
     uint8_t *copy = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-    if (copy) {
-        memcpy(copy, data, len);
-        g_assets.push_back({std::string(name), copy, len});
+    if (!copy) {
+        ESP_LOGE(TAG, "sd_asset_load_cb: alloc FAILED for %s (%zu bytes), psram_free=%u largest=%u",
+                 name, len,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        return;
     }
+    memcpy(copy, data, len);
+    g_assets.push_back({std::string(name), copy, len});
 }
 
 static bool load_game_from_sd(const char *project_id)
@@ -1036,12 +1041,15 @@ static void game_overlay_check()
     if (s.buttons & InputDev::START) {
         while (InputDev::get().buttons & InputDev::START) vTaskDelay(pdMS_TO_TICKS(20));
 
-        // Let the runtime finish the in-flight frame, then freeze display pushes
+        // Let the runtime finish the in-flight frame, then freeze display + audio
+        // (mixer keeps draining DMA but writes silence — sounds resume on dismiss)
         scratch_paused = true;
+        audio_mixer_set_suspended(true);
         vTaskDelay(pdMS_TO_TICKS(50));
 
         bool quit = ui_show_exit_confirm();
         scratch_paused = false;
+        audio_mixer_set_suspended(false);
         if (quit) {
             scratch_running = false;
         }
@@ -1051,9 +1059,11 @@ static void game_overlay_check()
     if (s.buttons & InputDev::BACK) {
         while (InputDev::get().buttons & InputDev::BACK) vTaskDelay(pdMS_TO_TICKS(20));
         scratch_paused = true;
+        audio_mixer_set_suspended(true);
         vTaskDelay(pdMS_TO_TICKS(50));
         ui_show_button_map();
         scratch_paused = false;
+        audio_mixer_set_suspended(false);
     }
 }
 
@@ -1196,6 +1206,17 @@ extern "C" void app_main(void)
         }
         // Give the idle task a few ticks to actually reap the deleted TCB+stack
         vTaskDelay(pdMS_TO_TICKS(100));
+
+        // Stop and free all sounds before returning to menu — otherwise the
+        // mixer keeps playing whatever was active when the game exited and the
+        // BGM bleeds into the menu UI.
+        SoundPlayer::cleanupAudio();
+        audio_mixer_set_suspended(false);  // ensure resume state for next game
+
+        // Free rasterized costume RGBAs (~10 MB for Ninja Demo). Otherwise
+        // PSRAM stays fragmented and the next project's 4 MB BGM allocation
+        // fails inside sd_asset_load_cb, falling back to a 10 s CDN download.
+        if (renderer) renderer->clearCostumes();
 
         // Game ended — clean up and return to menu
         free_assets();

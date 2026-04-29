@@ -108,9 +108,18 @@ SWRenderer::~SWRenderer() {
     if (fb[0]) heap_caps_free(fb[0]);
     if (fb[1]) heap_caps_free(fb[1]);
     if (penFb) heap_caps_free(penFb);
+    clearCostumes();
+}
+
+void SWRenderer::clearCostumes() {
+    size_t freed = 0;
     for (auto &[k, c] : costumes) {
-        if (c.rgba) heap_caps_free(c.rgba);
+        if (c.rgba)   { freed += (size_t)c.w * c.h * 4; heap_caps_free(c.rgba); }
+        if (c.rowSet) { heap_caps_free(c.rowSet); }
     }
+    size_t count = costumes.size();
+    costumes.clear();
+    ESP_LOGI(TAG, "clearCostumes: freed %zu costumes (~%zu RGBA bytes)", count, freed);
 }
 
 void SWRenderer::addDirtyRect(int x, int y, int w, int h) {
