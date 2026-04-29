@@ -55,6 +55,11 @@ static const char *EN[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "Fetching info...",
     [STR_LOADING_JSON]      = "Loading JSON...",
     [STR_ASSETS]            = "Assets",
+
+    [STR_QR_SCAN_WIFI_HEAD]    = "Show me your Wi-Fi QR!",
+    [STR_QR_SCAN_PROJECT_HEAD] = "Show me a Game QR!",
+    [STR_QR_HINT_BACK]         = "B: Back",
+    [STR_WIFI_TRY_AGAIN]       = "Let's try again",
 };
 
 static const char *JP[STR_COUNT] = {
@@ -106,6 +111,11 @@ static const char *JP[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "情報を取りに行ってるよ...",
     [STR_LOADING_JSON]      = "データを読み込み中...",
     [STR_ASSETS]            = "そざい",
+
+    [STR_QR_SCAN_WIFI_HEAD]    = "Wi-Fi の QR をかざしてね",
+    [STR_QR_SCAN_PROJECT_HEAD] = "ゲームの QR をかざしてね",
+    [STR_QR_HINT_BACK]         = "B: もどる",
+    [STR_WIFI_TRY_AGAIN]       = "もう一回 やってみよう",
 };
 
 static const char *KR[STR_COUNT] = {
@@ -157,6 +167,11 @@ static const char *KR[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "정보 가져오는 중...",
     [STR_LOADING_JSON]      = "JSON 로딩 중...",
     [STR_ASSETS]            = "에셋",
+
+    [STR_QR_SCAN_WIFI_HEAD]    = "WiFi QR을 보여줘!",
+    [STR_QR_SCAN_PROJECT_HEAD] = "게임 QR을 보여줘!",
+    [STR_QR_HINT_BACK]         = "B: 뒤로",
+    [STR_WIFI_TRY_AGAIN]       = "다시 해보자",
 };
 
 static const char *ZH_CN[STR_COUNT] = {
@@ -208,6 +223,11 @@ static const char *ZH_CN[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "获取信息中...",
     [STR_LOADING_JSON]      = "加载 JSON 中...",
     [STR_ASSETS]            = "资源",
+
+    [STR_QR_SCAN_WIFI_HEAD]    = "把 WiFi QR 给我看看！",
+    [STR_QR_SCAN_PROJECT_HEAD] = "把游戏 QR 给我看看！",
+    [STR_QR_HINT_BACK]         = "B: 返回",
+    [STR_WIFI_TRY_AGAIN]       = "再试一次",
 };
 
 static const char *lang_to_code(Lang l) {

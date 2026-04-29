@@ -1353,23 +1353,42 @@ MenuAction ui_menu_run()
             char ssid[64] = {}, pass[128] = {};
 
             if (camera_init()) {
+                // Carve a 110-px landscape strip at the bottom for the
+                // static overlay so PPA SRM never overwrites it.
+                const int QR_STRIP_H = 110;
+                camera_set_preview_strips(0, QR_STRIP_H);
+                dsi_qr_overlay_invalidate();
+                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_WIFI_HEAD),
+                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
+
                 char qr_buf[512];
                 while (!wifi_ok) {
-                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel, "Scan WiFi QR (B=Back)")) {
+                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel)) {
                         if (qr_buf[0] == 'W' && qr_buf[1] == ':') {
                             char *s = qr_buf + 2;
                             char *nl = strchr(s, '\n');
                             char *p = (char *)"";
                             if (nl) { *nl = '\0'; p = nl + 1; }
 
-                            dsi_modal_show(s_panel, "Connecting...", s);
+                            // Modal will overwrite the strip area; mark it
+                            // dirty so we redraw on re-entry below.
+                            dsi_qr_overlay_invalidate();
+                            // Run the connect flow at full screen.
+                            camera_set_preview_strips(0, 0);
+
+                            dsi_modal_show(s_panel, tr(STR_WIFI_CONNECTING), s);
                             if (wifi_connect(s, p, 15000)) {
                                 wifi_ok = true;
                                 snprintf(ssid, sizeof(ssid), "%.63s", s);
                                 snprintf(pass, sizeof(pass), "%.127s", p);
                             } else {
-                                dsi_modal_show(s_panel, "WiFi Failed", "Try again...");
+                                dsi_modal_show(s_panel, tr(STR_WIFI_FAILED),
+                                               tr(STR_WIFI_TRY_AGAIN));
                                 vTaskDelay(pdMS_TO_TICKS(2000));
+                                // Re-arm strip + overlay before resuming scan.
+                                camera_set_preview_strips(0, QR_STRIP_H);
+                                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_WIFI_HEAD),
+                                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
                             }
                         }
                     }
@@ -1377,6 +1396,7 @@ MenuAction ui_menu_run()
                     if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
+                camera_set_preview_strips(0, 0);
                 camera_deinit();
             }
 
@@ -1431,9 +1451,15 @@ MenuAction ui_menu_run()
             ESP_LOGI(TAG, "QR: camera_init...");
             if (camera_init()) {
                 ESP_LOGI(TAG, "QR: camera ready, scanning...");
+                const int QR_STRIP_H = 110;
+                camera_set_preview_strips(0, QR_STRIP_H);
+                dsi_qr_overlay_invalidate();
+                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_PROJECT_HEAD),
+                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
+
                 char qr_buf[512];
                 while (!got_project) {
-                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel, "Scan Project QR (B/Back=Return)")) {
+                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel)) {
                         if (qr_buf[0] == 'S' && qr_buf[1] == ':') {
                             snprintf(s_selected_project_id, sizeof(s_selected_project_id), "%.63s", qr_buf + 2);
                             got_project = true;
@@ -1449,6 +1475,7 @@ MenuAction ui_menu_run()
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 ESP_LOGI(TAG, "QR: calling camera_deinit...");
+                camera_set_preview_strips(0, 0);
                 camera_deinit();
                 ESP_LOGI(TAG, "QR: camera_deinit OK");
             } else {

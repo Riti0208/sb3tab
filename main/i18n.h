@@ -58,6 +58,11 @@ enum StringId {
     STR_LOADING_JSON,
     STR_ASSETS,
 
+    STR_QR_SCAN_WIFI_HEAD,      // "Wi-Fi の QR をかざしてね"
+    STR_QR_SCAN_PROJECT_HEAD,   // "ゲームの QR をかざしてね"
+    STR_QR_HINT_BACK,           // "B: もどる"
+    STR_WIFI_TRY_AGAIN,         // "もう一回 やってみよう"
+
     STR_COUNT,
 };
 
