@@ -5,6 +5,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "driver/ppa.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -91,6 +93,7 @@ SWRenderer::SWRenderer() {
     fb[1] = (uint8_t *)heap_caps_calloc(STAGE_W * STAGE_H * 3, 1, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
     currentFb = 0;
     penFb = nullptr;
+    costumeLock = (void *)xSemaphoreCreateMutex();
 
     // Init PPA fill client for fast clear
     if (!s_ppa_fill) {
@@ -109,6 +112,7 @@ SWRenderer::~SWRenderer() {
     if (fb[1]) heap_caps_free(fb[1]);
     if (penFb) heap_caps_free(penFb);
     clearCostumes();
+    if (costumeLock) vSemaphoreDelete((SemaphoreHandle_t)costumeLock);
 }
 
 void SWRenderer::clearCostumes() {
@@ -119,7 +123,153 @@ void SWRenderer::clearCostumes() {
     }
     size_t count = costumes.size();
     costumes.clear();
+    lruList.clear();
+    lruIter.clear();
+    totalRgbaBytes = 0;
     ESP_LOGI(TAG, "clearCostumes: freed %zu costumes (~%zu RGBA bytes)", count, freed);
+}
+
+// ---------------------------------------------------------------------------
+// Lazy-load support: each costume holds metadata permanently but its decoded
+// RGBA buffer (the big one — w*h*4 bytes) is treated as an LRU cache. When
+// the budget is exceeded we evict the least-recently-used decoded buffer;
+// the next access re-fetches via assetReader and re-decodes.
+// ---------------------------------------------------------------------------
+
+void SWRenderer::touchLru(const std::string &name) {
+    auto it = lruIter.find(name);
+    if (it != lruIter.end()) {
+        lruList.splice(lruList.begin(), lruList, it->second);
+    } else {
+        lruList.push_front(name);
+        lruIter[name] = lruList.begin();
+    }
+}
+
+void SWRenderer::evictRgba(CostumePixels &cp, const std::string &name) {
+    if (cp.rgba) {
+        size_t bytes = (size_t)cp.w * cp.h * 4;
+        if (totalRgbaBytes >= bytes) totalRgbaBytes -= bytes;
+        else totalRgbaBytes = 0;
+        heap_caps_free(cp.rgba);
+        cp.rgba = nullptr;
+    }
+    auto it = lruIter.find(name);
+    if (it != lruIter.end()) {
+        lruList.erase(it->second);
+        lruIter.erase(it);
+    }
+}
+
+void SWRenderer::evictUntilUnderBudget() {
+    // Evict from the back (LRU) until under budget. Don't evict the most
+    // recently touched costume (front) — that's what just got loaded.
+    while (totalRgbaBytes > costumeBudgetBytes && lruList.size() > 1) {
+        const std::string victim = lruList.back();
+        auto it = costumes.find(victim);
+        if (it == costumes.end()) {
+            lruList.pop_back();
+            lruIter.erase(victim);
+            continue;
+        }
+        evictRgba(it->second, victim);
+    }
+}
+
+bool SWRenderer::decodeInto(CostumePixels &cp, const std::string &name,
+                            const uint8_t *data, size_t len) {
+    int w = 0, h = 0;
+    uint8_t *pixels = nullptr;
+    bool isSvg = (name.size() > 4 && name.substr(name.size() - 4) == ".svg");
+
+    if (isSvg) {
+        char *svgCopy = (char *)heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM);
+        if (!svgCopy) return false;
+        memcpy(svgCopy, data, len);
+        svgCopy[len] = '\0';
+
+        NSVGimage *svg = nsvgParse(svgCopy, "px", 96.0f);
+        heap_caps_free(svgCopy);
+        if (!svg) { ESP_LOGE(TAG, "SVG parse failed: %s", name.c_str()); return false; }
+        w = (int)svg->width;
+        h = (int)svg->height;
+        if (w <= 0 || h <= 0) { nsvgDelete(svg); return false; }
+
+        pixels = (uint8_t *)heap_caps_malloc((size_t)w * h * 4, MALLOC_CAP_SPIRAM);
+        if (!pixels) { nsvgDelete(svg); return false; }
+
+        NSVGrasterizer *rast = nsvgCreateRasterizer();
+        nsvgRasterize(rast, svg, 0, 0, 1.0f, pixels, w, h, w * 4);
+        nsvgDeleteRasterizer(rast);
+        nsvgDelete(svg);
+    } else {
+        int channels;
+        pixels = stbi_load_from_memory(data, len, &w, &h, &channels, 4);
+        if (!pixels) { ESP_LOGE(TAG, "PNG decode failed: %s", name.c_str()); return false; }
+    }
+
+    cp.rgba = pixels;
+    cp.w = w;
+    cp.h = h;
+    totalRgbaBytes += (size_t)w * h * 4;
+
+    if (!cp.metaReady) {
+        // One-time metadata: tight bounds + per-row presence. Kept across
+        // future evictions of cp.rgba, so getCostumeSize/TrimBounds stay cheap.
+        cp.rowSet = (uint8_t *)heap_caps_calloc(h, 1, MALLOC_CAP_SPIRAM);
+        int minX = w, minY = h, maxX = -1, maxY = -1;
+        for (int yy = 0; yy < h; yy++) {
+            const uint8_t *row = pixels + yy * w * 4;
+            bool rowHasPixel = false;
+            for (int xx = 0; xx < w; xx++) {
+                if (row[xx * 4 + 3] != 0) {
+                    rowHasPixel = true;
+                    if (xx < minX) minX = xx;
+                    if (xx > maxX) maxX = xx;
+                    if (yy < minY) minY = yy;
+                    if (yy > maxY) maxY = yy;
+                }
+            }
+            if (cp.rowSet) cp.rowSet[yy] = rowHasPixel ? 1 : 0;
+        }
+        if (maxX < 0) {
+            cp.trimX = 0; cp.trimY = 0; cp.trimW = w; cp.trimH = h;
+        } else {
+            cp.trimX = minX;
+            cp.trimY = minY;
+            cp.trimW = maxX - minX + 1;
+            cp.trimH = maxY - minY + 1;
+        }
+        cp.metaReady = true;
+    }
+    return true;
+}
+
+bool SWRenderer::ensureDecoded(const std::string &name, CostumePixels &cp) {
+    SemaphoreHandle_t lock = (SemaphoreHandle_t)costumeLock;
+    if (lock) xSemaphoreTake(lock, portMAX_DELAY);
+
+    if (cp.rgba) {
+        touchLru(name);
+        if (lock) xSemaphoreGive(lock);
+        return true;
+    }
+    if (!assetReader) {
+        if (lock) xSemaphoreGive(lock);
+        return false;
+    }
+    auto bytes = assetReader(name);
+    if (bytes.empty()) {
+        if (lock) xSemaphoreGive(lock);
+        return false;
+    }
+    bool ok = decodeInto(cp, name, bytes.data(), bytes.size());
+    if (ok) {
+        touchLru(name);
+        evictUntilUnderBudget();
+    }
+    if (lock) xSemaphoreGive(lock);
+    return ok;
 }
 
 void SWRenderer::addDirtyRect(int x, int y, int w, int h) {
@@ -225,76 +375,26 @@ bool SWRenderer::loadCostume(const std::string &md5ext, double rotCenterX, doubl
 
 bool SWRenderer::loadCostumeFromMemory(const std::string &name, const uint8_t *data, size_t len,
                                         double rotCenterX, double rotCenterY) {
-    if (costumes.count(name)) return true;
+    SemaphoreHandle_t lock = (SemaphoreHandle_t)costumeLock;
+    if (lock) xSemaphoreTake(lock, portMAX_DELAY);
 
-    int w = 0, h = 0;
-    uint8_t *pixels = nullptr;
-    bool isSvg = (name.size() > 4 && name.substr(name.size() - 4) == ".svg");
-
-    if (isSvg) {
-        // Copy and null-terminate for nanosvg (it modifies in-place)
-        char *svgCopy = (char *)heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM);
-        if (!svgCopy) return false;
-        memcpy(svgCopy, data, len);
-        svgCopy[len] = '\0';
-
-        NSVGimage *svg = nsvgParse(svgCopy, "px", 96.0f);
-        heap_caps_free(svgCopy);
-
-        if (!svg) { ESP_LOGE(TAG, "SVG parse failed: %s", name.c_str()); return false; }
-        w = (int)svg->width;
-        h = (int)svg->height;
-        if (w <= 0 || h <= 0) { nsvgDelete(svg); return false; }
-
-        pixels = (uint8_t *)heap_caps_malloc(w * h * 4, MALLOC_CAP_SPIRAM);
-        if (!pixels) { nsvgDelete(svg); return false; }
-
-        NSVGrasterizer *rast = nsvgCreateRasterizer();
-        nsvgRasterize(rast, svg, 0, 0, 1.0f, pixels, w, h, w * 4);
-        nsvgDeleteRasterizer(rast);
-        nsvgDelete(svg);
-        ESP_LOGI(TAG, "Rasterized SVG %s: %dx%d", name.c_str(), w, h);
-    } else {
-        int channels;
-        pixels = stbi_load_from_memory(data, len, &w, &h, &channels, 4);
-        if (!pixels) { ESP_LOGE(TAG, "PNG decode failed: %s", name.c_str()); return false; }
-        ESP_LOGI(TAG, "Decoded PNG %s: %dx%d", name.c_str(), w, h);
-    }
-
-    CostumePixels cp;
-    cp.rgba = pixels;
-    cp.w = w;
-    cp.h = h;
+    auto &cp = costumes[name];
     cp.rotCenterX = rotCenterX;
     cp.rotCenterY = rotCenterY;
-
-    // Compute tight bounds of visible (alpha > 0) pixels and per-row presence.
-    cp.rowSet = (uint8_t *)heap_caps_calloc(h, 1, MALLOC_CAP_SPIRAM);
-    int minX = w, minY = h, maxX = -1, maxY = -1;
-    for (int yy = 0; yy < h; yy++) {
-        const uint8_t *row = pixels + yy * w * 4;
-        bool rowHasPixel = false;
-        for (int xx = 0; xx < w; xx++) {
-            if (row[xx * 4 + 3] != 0) {
-                rowHasPixel = true;
-                if (xx < minX) minX = xx;
-                if (xx > maxX) maxX = xx;
-                if (yy < minY) minY = yy;
-                if (yy > maxY) maxY = yy;
-            }
-        }
-        if (cp.rowSet) cp.rowSet[yy] = rowHasPixel ? 1 : 0;
+    if (cp.rgba) {
+        // Already decoded earlier (likely from another sprite sharing the
+        // costume); just refresh LRU position.
+        touchLru(name);
+        if (lock) xSemaphoreGive(lock);
+        return true;
     }
-    if (maxX < 0) {
-        cp.trimX = 0; cp.trimY = 0; cp.trimW = w; cp.trimH = h;
-    } else {
-        cp.trimX = minX;
-        cp.trimY = minY;
-        cp.trimW = maxX - minX + 1;
-        cp.trimH = maxY - minY + 1;
+    if (!decodeInto(cp, name, data, len)) {
+        if (lock) xSemaphoreGive(lock);
+        return false;
     }
-
-    costumes[name] = cp;
+    touchLru(name);
+    evictUntilUnderBudget();
+    if (lock) xSemaphoreGive(lock);
     return true;
 }
 
@@ -309,8 +409,14 @@ bool SWRenderer::getCostumeTrimBounds(const std::string &name, int &trimX, int &
 }
 
 const uint8_t *SWRenderer::getCostumeRGBA(const std::string &name, int &w, int &h) const {
-    auto it = costumes.find(name);
-    if (it == costumes.end()) return nullptr;
+    // Pixel-perfect collision needs the decoded buffer. Cast away const so
+    // we can re-decode-on-demand under LRU eviction. This is logically
+    // const-correct: we only mutate the lazy cache, not the costume's
+    // identity.
+    auto *self = const_cast<SWRenderer *>(this);
+    auto it = self->costumes.find(name);
+    if (it == self->costumes.end()) return nullptr;
+    if (!self->ensureDecoded(name, it->second)) return nullptr;
     w = it->second.w;
     h = it->second.h;
     return it->second.rgba;
@@ -323,6 +429,7 @@ void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
     if (!visible) return;
     auto it = costumes.find(costumeMd5ext);
     if (it == costumes.end()) return;
+    if (!ensureDecoded(costumeMd5ext, it->second)) return;
 
     float alpha = 1.0f - (ghostEffect / 100.0f);
     if (alpha <= 0.0f) return;
@@ -337,6 +444,7 @@ void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
 void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
     auto it = costumes.find(costumeMd5ext);
     if (it == costumes.end()) return;
+    if (!ensureDecoded(costumeMd5ext, it->second)) return;
 
     const CostumePixels &cos = it->second;
     if (!cos.rgba) return;
@@ -369,6 +477,7 @@ void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
 bool SWRenderer::drawBackdropFull(const std::string &costumeMd5ext) {
     auto it = costumes.find(costumeMd5ext);
     if (it == costumes.end()) return false;
+    if (!ensureDecoded(costumeMd5ext, it->second)) return false;
 
     const CostumePixels &cos = it->second;
     if (!cos.rgba) return false;
@@ -522,6 +631,7 @@ void SWRenderer::penStampSprite(const std::string &costumeMd5ext, float x, float
     if (!penFb) return;
     auto it = costumes.find(costumeMd5ext);
     if (it == costumes.end()) return;
+    if (!ensureDecoded(costumeMd5ext, it->second)) return;
 
     float alpha = 1.0f - (ghostEffect / 100.0f);
     if (alpha <= 0.0f) return;

@@ -125,7 +125,58 @@ void wifi_disconnect()
     if (s_wifi_lock) xSemaphoreGive(s_wifi_lock);
 }
 
-// HTTP GET with streaming to PSRAM buffer
+// Read body of an open request into a freshly allocated PSRAM buffer.
+// content_length may be -1 if unknown (chunked).
+static uint8_t *read_body(esp_http_client_handle_t client, int content_length,
+                          size_t *out_len,
+                          const std::function<void(size_t, size_t)> &progress_cb)
+{
+    const bool length_known = (content_length > 0);
+    size_t capacity = length_known ? (size_t)content_length : (256 * 1024);
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes", capacity);
+        return nullptr;
+    }
+
+    size_t received = 0;
+    while (true) {
+        size_t want = capacity - received;
+        if (want == 0) {
+            // Buffer full. If we know the total length, we're done — DO NOT
+            // speculatively grow at end-of-stream (the previous version did
+            // and ended up storing 2x-oversized buffers, exhausting PSRAM
+            // after a few hundred assets).
+            if (length_known) break;
+            size_t new_cap = capacity * 2;
+            uint8_t *newbuf = (uint8_t *)heap_caps_realloc(buf, new_cap, MALLOC_CAP_SPIRAM);
+            if (!newbuf) {
+                ESP_LOGE(TAG, "Realloc failed at %zu", capacity);
+                heap_caps_free(buf);
+                return nullptr;
+            }
+            buf = newbuf;
+            capacity = new_cap;
+            want = capacity - received;
+        }
+        size_t chunk = want > 8192 ? 8192 : want;
+        int read_len = esp_http_client_read(client, (char *)buf + received, chunk);
+        if (read_len < 0) {
+            ESP_LOGW(TAG, "http_client_read returned %d after %zu bytes", read_len, received);
+            break;
+        }
+        if (read_len == 0) break;
+        received += read_len;
+        if (progress_cb) {
+            progress_cb(received, length_known ? (size_t)content_length : 0);
+        }
+    }
+
+    *out_len = received;
+    return buf;
+}
+
+// HTTP GET with streaming to PSRAM buffer (one-shot, no keep-alive)
 uint8_t *wifi_http_get(const char *url, size_t *out_len,
                        std::function<void(size_t, size_t)> progress_cb,
                        bool skip_cert_check)
@@ -133,7 +184,6 @@ uint8_t *wifi_http_get(const char *url, size_t *out_len,
     (void)skip_cert_check;
     *out_len = 0;
 
-    // Log heap state at start of HTTPS request (TLS handshake needs internal RAM)
     ESP_LOGI(TAG, "wifi_http_get: heap internal=%u (largest=%u) psram=%u",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -142,11 +192,11 @@ uint8_t *wifi_http_get(const char *url, size_t *out_len,
     esp_http_client_config_t config = {};
     config.url = url;
     config.timeout_ms = 30000;
-    config.buffer_size = 4096;
+    config.buffer_size = 16384;
     config.buffer_size_tx = 1024;
     config.disable_auto_redirect = false;
     config.max_redirection_count = 5;
-    config.crt_bundle_attach = esp_crt_bundle_attach;  // Use ESP-IDF cert bundle for HTTPS
+    config.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
@@ -154,7 +204,6 @@ uint8_t *wifi_http_get(const char *url, size_t *out_len,
         return nullptr;
     }
 
-    // Don't accept gzip (miniz crashes on P4)
     esp_http_client_set_header(client, "Accept-Encoding", "identity");
 
     esp_err_t err = esp_http_client_open(client, 0);
@@ -174,43 +223,94 @@ uint8_t *wifi_http_get(const char *url, size_t *out_len,
         return nullptr;
     }
 
-    // Allocate buffer
-    size_t alloc_size = (content_length > 0) ? (size_t)content_length : (256 * 1024);
-    size_t capacity = alloc_size;
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM);
-    if (!buf) {
-        ESP_LOGE(TAG, "Failed to allocate %zu bytes", capacity);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return nullptr;
-    }
-
-    size_t received = 0;
-    int read_len;
-    while ((read_len = esp_http_client_read(client, (char *)buf + received, 4096)) > 0) {
-        received += read_len;
-        if (progress_cb) {
-            progress_cb(received, content_length > 0 ? (size_t)content_length : 0);
-        }
-        // Grow buffer if needed
-        if (received + 4096 > capacity) {
-            capacity *= 2;
-            uint8_t *newbuf = (uint8_t *)heap_caps_realloc(buf, capacity, MALLOC_CAP_SPIRAM);
-            if (!newbuf) {
-                ESP_LOGE(TAG, "Realloc failed at %zu", capacity);
-                heap_caps_free(buf);
-                esp_http_client_close(client);
-                esp_http_client_cleanup(client);
-                return nullptr;
-            }
-            buf = newbuf;
-        }
-    }
-
+    uint8_t *buf = read_body(client, content_length, out_len, progress_cb);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    *out_len = received;
-    ESP_LOGI(TAG, "Downloaded %zu bytes from %s", received, url);
+    if (!buf) return nullptr;
+    ESP_LOGI(TAG, "Downloaded %zu bytes from %s", *out_len, url);
     return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent session (HTTP keep-alive across many GETs)
+// ---------------------------------------------------------------------------
+
+struct WifiHttpSession {
+    esp_http_client_handle_t client;
+};
+
+WifiHttpSession *wifi_http_session_open(const char *seed_url)
+{
+    ESP_LOGI(TAG, "wifi_http_session_open: %s (heap internal=%u largest=%u psram=%u)",
+        seed_url,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+    esp_http_client_config_t config = {};
+    config.url = seed_url;
+    config.timeout_ms = 30000;
+    config.buffer_size = 16384;
+    config.buffer_size_tx = 1024;
+    config.disable_auto_redirect = false;
+    config.max_redirection_count = 5;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 5;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to init session client");
+        return nullptr;
+    }
+
+    auto *s = new WifiHttpSession();
+    s->client = client;
+    return s;
+}
+
+uint8_t *wifi_http_session_get(WifiHttpSession *s, const char *url, size_t *out_len,
+                               std::function<void(size_t, size_t)> progress_cb)
+{
+    *out_len = 0;
+    if (!s || !s->client) return nullptr;
+
+    esp_err_t err = esp_http_client_set_url(s->client, url);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_url failed: %s", esp_err_to_name(err));
+        return nullptr;
+    }
+    esp_http_client_set_method(s->client, HTTP_METHOD_GET);
+    esp_http_client_set_header(s->client, "Accept-Encoding", "identity");
+
+    err = esp_http_client_open(s->client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "session open failed: %s", esp_err_to_name(err));
+        return nullptr;
+    }
+
+    int content_length = esp_http_client_fetch_headers(s->client);
+    int status = esp_http_client_get_status_code(s->client);
+    if (status < 200 || status >= 300) {
+        ESP_LOGE(TAG, "HTTP %d for %s", status, url);
+        esp_http_client_close(s->client);
+        return nullptr;
+    }
+
+    uint8_t *buf = read_body(s->client, content_length, out_len, progress_cb);
+    // Keep TCP/TLS up; close just finalizes this request when keep-alive is on.
+    esp_http_client_close(s->client);
+    if (!buf) return nullptr;
+    ESP_LOGI(TAG, "session GET %zu bytes from %s", *out_len, url);
+    return buf;
+}
+
+void wifi_http_session_close(WifiHttpSession *s)
+{
+    if (!s) return;
+    if (s->client) esp_http_client_cleanup(s->client);
+    delete s;
 }

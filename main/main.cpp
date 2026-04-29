@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -149,11 +150,19 @@ struct AssetEntry {
 };
 static std::vector<AssetEntry> g_assets;
 
+// When non-empty, the runtime asset resolvers (Image::setMemoryProvider and
+// the costume/sound loaders) read each asset on demand from
+// /sd/games/<g_assets_sd_project_id>/assets/<name> instead of looking up
+// g_assets in PSRAM. Set after a streaming QR download finishes; cleared on
+// USB-fed loads where everything stays resident in g_assets.
+static std::string g_assets_sd_project_id;
+
 static void free_assets() {
     for (auto &a : g_assets) {
         if (a.data) heap_caps_free(a.data);
     }
     g_assets.clear();
+    g_assets_sd_project_id.clear();
     if (g_project_json) { delete g_project_json; g_project_json = nullptr; }
 }
 
@@ -692,8 +701,9 @@ static bool load_and_run()
         render_set_pen_callbacks(pen_init_cb, pen_clear_cb, pen_line_cb, pen_dot_cb, pen_stamp_cb);
         render_set_costume_size_callback(costume_size_cb);
         render_set_input_callback(input_to_scratch_callback);
-        // Serve image bytes from in-memory g_assets when scratch_core's
-        // Image::readFileToBuffer() is asked for "project/<hash>.<ext>".
+        // Serve image bytes either from g_assets (USB-fed projects) or
+        // directly from SD (streamed-download projects, where g_assets is
+        // empty to keep PSRAM peak ≈ one asset).
         Image::setMemoryProvider([](const std::string &filePath)
             -> nonstd::expected<std::vector<unsigned char>, std::string> {
             std::string name = filePath;
@@ -704,6 +714,16 @@ static bool load_and_run()
             for (auto &asset : g_assets) {
                 if (asset.name == name) {
                     return std::vector<unsigned char>(asset.data, asset.data + asset.len);
+                }
+            }
+            if (!g_assets_sd_project_id.empty()) {
+                size_t alen = 0;
+                uint8_t *adata = sd_read_asset(g_assets_sd_project_id.c_str(),
+                                               name.c_str(), &alen);
+                if (adata) {
+                    std::vector<unsigned char> v(adata, adata + alen);
+                    heap_caps_free(adata);
+                    return v;
                 }
             }
             return nonstd::make_unexpected("not in memory: " + filePath);
@@ -723,43 +743,61 @@ static bool load_and_run()
         usb_ll_write(msg);
     }
 
-    // Load costumes and sounds from received assets
+    // Load costumes and sounds. Resolve each asset by name from either
+    // g_assets (USB-resident) or SD (streamed-download). The `from_sd` flag
+    // tells the consumer whether the buffer is about to be freed: for SD
+    // we MUST force a copy because audio's fast path borrows the source
+    // pointer for the sound's lifetime.
+    auto resolve_asset = [](const std::string &name,
+                            std::function<void(const uint8_t *, size_t, bool)> use)
+    {
+        for (auto &asset : g_assets) {
+            if (asset.name == name) {
+                use(asset.data, asset.len, /*from_sd=*/false);
+                return true;
+            }
+        }
+        if (!g_assets_sd_project_id.empty()) {
+            size_t alen = 0;
+            uint8_t *adata = sd_read_asset(g_assets_sd_project_id.c_str(),
+                                            name.c_str(), &alen);
+            if (adata) {
+                use(adata, alen, /*from_sd=*/true);
+                heap_caps_free(adata);
+                return true;
+            }
+        }
+        return false;
+    };
+
     for (auto &sprite : Scratch::sprites) {
         for (auto &costume : sprite->costumes) {
             if (costume.fullName.empty()) continue;
-            for (auto &asset : g_assets) {
-                if (asset.name == costume.fullName) {
-                    renderer->loadCostumeFromMemory(costume.fullName,
-                                                     asset.data, asset.len,
-                                                     costume.rotationCenterX,
-                                                     costume.rotationCenterY);
-                    // Set sprite dimensions for collision/bounce detection
-                    int cw, ch;
-                    if (renderer->getCostumeSize(costume.fullName, cw, ch)) {
-                        sprite->spriteWidth = cw;
-                        sprite->spriteHeight = ch;
-                    }
-                    // Tight bounds of visible pixels for AABB collision
-                    int tx, ty, tw, th;
-                    if (renderer->getCostumeTrimBounds(costume.fullName, tx, ty, tw, th)) {
-                        costume.trimOffsetX = tx;
-                        costume.trimOffsetY = ty;
-                        costume.trimWidth = tw;
-                        costume.trimHeight = th;
-                    }
-                    break;
+            resolve_asset(costume.fullName, [&](const uint8_t *data, size_t len, bool) {
+                renderer->loadCostumeFromMemory(costume.fullName,
+                                                 data, len,
+                                                 costume.rotationCenterX,
+                                                 costume.rotationCenterY);
+                int cw, ch;
+                if (renderer->getCostumeSize(costume.fullName, cw, ch)) {
+                    sprite->spriteWidth = cw;
+                    sprite->spriteHeight = ch;
                 }
-            }
+                int tx, ty, tw, th;
+                if (renderer->getCostumeTrimBounds(costume.fullName, tx, ty, tw, th)) {
+                    costume.trimOffsetX = tx;
+                    costume.trimOffsetY = ty;
+                    costume.trimWidth = tw;
+                    costume.trimHeight = th;
+                }
+            });
         }
         for (auto &sound : sprite->sounds) {
             if (sound.fullName.empty()) continue;
-            for (auto &asset : g_assets) {
-                if (asset.name == sound.fullName) {
-                    SoundPlayer::loadSoundFromMemory(sound.fullName,
-                                                      asset.data, asset.len);
-                    break;
-                }
-            }
+            resolve_asset(sound.fullName, [&](const uint8_t *data, size_t len, bool from_sd) {
+                SoundPlayer::loadSoundFromMemory(sound.fullName, data, len,
+                                                  /*force_copy=*/from_sd);
+            });
         }
     }
 
@@ -879,8 +917,27 @@ static bool qr_download_project(const char *project_id)
         g_project_json = nullptr;
         return false;
     }
-    heap_caps_free(json_data);
     usb_ll_write("JSON_OK\n");
+
+    // Persist project.json + create game directory so we can stream-write each
+    // asset directly to SD (large projects don't fit in PSRAM). Drop any
+    // PSRAM assets left over from a previous run *without* touching the JSON
+    // we just parsed.
+    for (auto &a : g_assets) {
+        if (a.data) heap_caps_free(a.data);
+    }
+    g_assets.clear();
+    g_assets_sd_project_id.clear();
+    {
+        const char *display_name = !g_project_title.empty() ? g_project_title.c_str() : project_id;
+        if (sd_game_begin(project_id, display_name) &&
+            sd_game_save_json(project_id, (const char *)json_data, json_len)) {
+            g_assets_sd_project_id = project_id;
+        } else {
+            ESP_LOGW(TAG, "SD streaming setup failed; falling back to PSRAM-resident");
+        }
+    }
+    heap_caps_free(json_data);
 
     {
         char hmsg[160];
@@ -920,35 +977,87 @@ static bool qr_download_project(const char *project_id)
     asset_names.erase(std::unique(asset_names.begin(), asset_names.end()), asset_names.end());
 
     int total_assets = (int)asset_names.size();
+
+    // Sequential download in the calling task using a persistent keep-alive
+    // WifiHttpSession. Avoids spawning helper tasks entirely.
+    //
+    // Why no parallel worker tasks: every multi-worker variant tripped
+    // FreeRTOS's "TLSP deletion callback at index 0 overwritten" panic at
+    // task deletion. Root cause is in ESP-IDF: TLS slot 0 is shared by
+    // pthread (data + cleanup callback via ...AndDelCallback) and lwIP
+    // (data only via vTaskSetThreadLocalStoragePointer with no bounds
+    // protection on the callback half), and the worker's per-task
+    // semaphore lifecycle ends up corrupting the callback slot. The
+    // assert is in port.c::vPortTLSPointersDelCb, fires on vTaskDelete.
+    // Not running vTaskDelete at all sidesteps the whole mess.
+    //
+    // Keep-alive on a single connection still gives the dominant speedup
+    // (one TLS handshake for the whole project instead of per asset).
     int downloaded = 0;
+    int skipped = 0;
+    WifiHttpSession *session = wifi_http_session_open(
+        "https://assets.scratch.mit.edu/internalapi/asset/");
+
+    {
+        char hmsg[96];
+        snprintf(hmsg, sizeof(hmsg), "DL: keep-alive %s, %d assets\n",
+                 session ? "on" : "off (fallback)", total_assets);
+        usb_ll_write(hmsg);
+    }
 
     for (auto &name : asset_names) {
         ui_download_update(tr(STR_ASSETS), downloaded, total_assets);
 
         snprintf(url, sizeof(url),
-                 "https://assets.scratch.mit.edu/internalapi/asset/%s/get/", name.c_str());
+                 "https://assets.scratch.mit.edu/internalapi/asset/%s/get/",
+                 name.c_str());
 
-        size_t asset_len = 0;
-        uint8_t *asset_data = wifi_http_get(url, &asset_len);
+        size_t alen = 0;
+        uint8_t *adata = nullptr;
+        if (session) {
+            adata = wifi_http_session_get(session, url, &alen);
+        }
+        if (!adata) {
+            adata = wifi_http_get(url, &alen);
+        }
 
-        if (!asset_data) {
+        if (!adata) {
+            skipped++;
             char msg[128];
             snprintf(msg, sizeof(msg), "WARN:asset skip %s\n", name.c_str());
             usb_ll_write(msg);
             continue;
         }
 
-        g_assets.push_back({name, asset_data, asset_len});
+        // Stream straight to SD when streaming mode is active; otherwise
+        // (SD setup failed) fall back to PSRAM accumulation.
+        if (!g_assets_sd_project_id.empty()) {
+            bool ok = sd_game_save_asset(g_assets_sd_project_id.c_str(),
+                                         name.c_str(), adata, alen);
+            heap_caps_free(adata);
+            if (!ok) {
+                skipped++;
+                char msg[128];
+                snprintf(msg, sizeof(msg), "WARN:sd-write fail %s\n", name.c_str());
+                usb_ll_write(msg);
+                continue;
+            }
+        } else {
+            g_assets.push_back({name, adata, alen});
+        }
         downloaded++;
 
         char msg[128];
         snprintf(msg, sizeof(msg), "ASSET %d/%d: %s (%zu B)\n",
-                 downloaded, total_assets, name.c_str(), asset_len);
+                 downloaded, total_assets, name.c_str(), alen);
         usb_ll_write(msg);
     }
 
-    char msg[64];
-    snprintf(msg, sizeof(msg), "DL_DONE: %d assets\n", downloaded);
+    if (session) wifi_http_session_close(session);
+
+    char msg[80];
+    snprintf(msg, sizeof(msg), "DL_DONE: %d/%d assets (skipped %d)\n",
+             downloaded, total_assets, skipped);
     usb_ll_write(msg);
     return true;
 }
@@ -982,8 +1091,11 @@ static bool load_game_from_sd(const char *project_id)
 {
     free_assets();
 
+    // Read JSON only — assets are pulled lazily from SD by the runtime
+    // resolver (see g_assets_sd_project_id usage). Big projects can't fit
+    // all assets in PSRAM at once.
     size_t json_len = 0;
-    char *json_str = sd_load_game(project_id, &json_len, sd_asset_load_cb, nullptr);
+    char *json_str = sd_read_project_json(project_id, &json_len);
     if (!json_str) return false;
 
     if (g_project_json) delete g_project_json;
@@ -998,6 +1110,8 @@ static bool load_game_from_sd(const char *project_id)
         return false;
     }
     heap_caps_free(json_str);
+
+    g_assets_sd_project_id = project_id;
     return true;
 }
 
@@ -1007,6 +1121,11 @@ static bool load_game_from_sd(const char *project_id)
 
 static void save_current_project_to_sd(const char *project_id)
 {
+    // Streamed downloads have already written everything to SD during DL.
+    if (!g_assets_sd_project_id.empty() && g_assets_sd_project_id == project_id) {
+        ESP_LOGI(TAG, "save_to_sd: already streamed during DL, skipping");
+        return;
+    }
     if (!g_project_json || g_assets.empty()) {
         ESP_LOGW(TAG, "save_to_sd skipped: json=%p assets=%zu",
                  g_project_json, g_assets.size());
@@ -1087,6 +1206,28 @@ extern "C" void app_main(void)
 
     sprite_mutex = xSemaphoreCreateMutex();
     renderer = new SWRenderer();
+
+    // Asset reader the renderer uses to refill an evicted costume's RGBA.
+    // Looks up g_assets first (USB-fed projects keep raw bytes resident);
+    // otherwise falls back to /sd/games/<id>/assets/<name>.
+    renderer->setAssetReader([](const std::string &name) -> std::vector<uint8_t> {
+        for (auto &asset : g_assets) {
+            if (asset.name == name) {
+                return std::vector<uint8_t>(asset.data, asset.data + asset.len);
+            }
+        }
+        if (!g_assets_sd_project_id.empty()) {
+            size_t alen = 0;
+            uint8_t *adata = sd_read_asset(g_assets_sd_project_id.c_str(),
+                                            name.c_str(), &alen);
+            if (adata) {
+                std::vector<uint8_t> v(adata, adata + alen);
+                heap_caps_free(adata);
+                return v;
+            }
+        }
+        return {};
+    });
 
 #if USE_DSI_DISPLAY
     dsi_panel = dsi_display_init();

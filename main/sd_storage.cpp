@@ -226,6 +226,131 @@ void sd_list_games(SdGameList *games)
     ESP_LOGI(TAG, "Found %d saved games", games->count);
 }
 
+// ============================================================
+// Streaming save API (used during HTTPS download to avoid holding all
+// assets in PSRAM simultaneously — large projects easily exceed 22 MB).
+// ============================================================
+
+bool sd_game_begin(const char *project_id, const char *name)
+{
+    if (!s_mounted) {
+        ESP_LOGE(TAG, "game_begin: SD not mounted");
+        return false;
+    }
+    ensure_games_dir();
+
+    char dir[280];
+    snprintf(dir, sizeof(dir), "%s/%s", GAMES_DIR, project_id);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "game_begin: mkdir(%s): %s", dir, strerror(errno));
+        return false;
+    }
+
+    char assets_dir[300];
+    snprintf(assets_dir, sizeof(assets_dir), "%s/assets", dir);
+    if (mkdir(assets_dir, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "game_begin: mkdir(%s): %s", assets_dir, strerror(errno));
+        return false;
+    }
+
+    if (name && name[0]) {
+        char path[320];
+        snprintf(path, sizeof(path), "%s/name.txt", dir);
+        FILE *f = fopen(path, "w");
+        if (f) { fprintf(f, "%s\n", name); fclose(f); }
+    }
+    return true;
+}
+
+bool sd_game_save_json(const char *project_id, const char *json, size_t json_len)
+{
+    if (!s_mounted) return false;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s/project.json", GAMES_DIR, project_id);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "save_json: fopen(%s): %s", path, strerror(errno));
+        return false;
+    }
+    size_t w = fwrite(json, 1, json_len, f);
+    fclose(f);
+    if (w != json_len) {
+        ESP_LOGE(TAG, "save_json: short write (%zu/%zu)", w, json_len);
+        return false;
+    }
+    return true;
+}
+
+bool sd_game_save_asset(const char *project_id, const char *asset_name,
+                        const uint8_t *data, size_t len)
+{
+    if (!s_mounted) return false;
+    char path[400];
+    snprintf(path, sizeof(path), "%s/%s/assets/%s", GAMES_DIR, project_id, asset_name);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "save_asset: fopen(%s): %s", path, strerror(errno));
+        return false;
+    }
+    size_t w = fwrite(data, 1, len, f);
+    fclose(f);
+    if (w != len) {
+        ESP_LOGE(TAG, "save_asset: short write %s (%zu/%zu)", asset_name, w, len);
+        return false;
+    }
+    return true;
+}
+
+uint8_t *sd_read_asset(const char *project_id, const char *asset_name, size_t *out_len)
+{
+    *out_len = 0;
+    if (!s_mounted) return nullptr;
+    char path[400];
+    snprintf(path, sizeof(path), "%s/%s/assets/%s", GAMES_DIR, project_id, asset_name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return nullptr;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) { fclose(f); return nullptr; }
+
+    uint8_t *buf = (uint8_t *)heap_caps_malloc((size_t)fsize, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(f); return nullptr; }
+    size_t r = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    if (r != (size_t)fsize) {
+        heap_caps_free(buf);
+        return nullptr;
+    }
+    *out_len = (size_t)fsize;
+    return buf;
+}
+
+char *sd_read_project_json(const char *project_id, size_t *out_len)
+{
+    *out_len = 0;
+    if (!s_mounted) return nullptr;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s/project.json", GAMES_DIR, project_id);
+    FILE *f = fopen(path, "r");
+    if (!f) return nullptr;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) { fclose(f); return nullptr; }
+
+    char *buf = (char *)heap_caps_malloc((size_t)fsize + 1, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(f); return nullptr; }
+    size_t r = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    if (r != (size_t)fsize) { heap_caps_free(buf); return nullptr; }
+    buf[fsize] = '\0';
+    *out_len = (size_t)fsize;
+    return buf;
+}
+
 void sd_save_game(const char *project_id, const char *name,
                   const char *project_json, size_t json_len,
                   const SdAsset *assets, int asset_count)

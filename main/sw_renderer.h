@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include <list>
+#include <functional>
 #include <unordered_map>
 #include "esp_http_client.h"
 
@@ -15,7 +17,7 @@
 #define LOGICAL_TO_FB 0.8f
 
 struct CostumePixels {
-    uint8_t *rgba = nullptr;  // RGBA8888
+    uint8_t *rgba = nullptr;  // RGBA8888 — may be nullptr when evicted from LRU.
     int w = 0;
     int h = 0;
     double rotCenterX = 0;
@@ -27,6 +29,8 @@ struct CostumePixels {
     // 0 if fully empty. Lets the blit loop skip whole-row no-ops, big win for
     // SVGs with sparse content (e.g. ground sprite with transparent middle).
     uint8_t *rowSet = nullptr;
+    // True once dimensions/trim/rowSet have been computed at least once.
+    bool metaReady = false;
 };
 
 class SWRenderer {
@@ -106,11 +110,58 @@ public:
     // and starve the next project's large WAV/asset allocations.
     void clearCostumes();
 
+    // Lazy-load support: caller installs a reader that returns the raw
+    // encoded bytes (PNG/SVG) for a given costume name, fetched from
+    // wherever the project lives (SD card, in-memory g_assets, ...). When
+    // a costume's RGBA has been evicted to stay under the budget, the
+    // renderer calls this to decode it again on demand.
+    using AssetReader = std::function<std::vector<uint8_t>(const std::string &)>;
+    void setAssetReader(AssetReader r) { assetReader = std::move(r); }
+
+    // Cap on RGBA bytes held resident across all costumes. When exceeded
+    // after a decode, the LRU costume is evicted (rgba freed; metadata kept
+    // so AABB sizing/trim still works without re-decoding).
+    void setCostumeBudgetBytes(size_t bytes) { costumeBudgetBytes = bytes; }
+
 private:
     uint8_t *fb[2];   // Double-buffered STAGE_W * STAGE_H * 3 (RGB888)
     int currentFb = 0;
     uint8_t *penFb;   // STAGE_W * STAGE_H * 4 (RGBA8888) pen layer
     std::unordered_map<std::string, CostumePixels> costumes;
+
+    // LRU bookkeeping for decoded RGBA buffers. lruList is most-recent-first;
+    // lruIter[name] points into it for O(1) move-to-front and erase.
+    std::list<std::string> lruList;
+    std::unordered_map<std::string, std::list<std::string>::iterator> lruIter;
+    size_t totalRgbaBytes = 0;
+    size_t costumeBudgetBytes = 8 * 1024 * 1024;  // 8 MB default
+    AssetReader assetReader;
+    // Serialises the lazy-load / LRU bookkeeping path so two cores rendering
+    // different sprites can't trample lruList and lruIter at the same time.
+    // The actual blit reads cp.rgba *outside* the lock, which is safe because
+    // touchLru pins the just-touched costume at the front of the LRU and
+    // evictUntilUnderBudget only removes from the back.
+    void *costumeLock = nullptr;  // SemaphoreHandle_t (mutex), opaque here
+
+    // Decode the encoded bytes into cp.rgba (and on first call also fill
+    // w/h/trim/rowSet). Returns true on success.
+    bool decodeInto(CostumePixels &cp, const std::string &name,
+                    const uint8_t *data, size_t len);
+
+    // Make sure cp.rgba is loaded. Re-fetches via assetReader if needed.
+    // Returns nullptr-equivalent failure as false; on success the costume
+    // is moved to the front of the LRU.
+    bool ensureDecoded(const std::string &name, CostumePixels &cp);
+
+    // Drop cp.rgba (and rowSet, since it's tied to the same decode). Keeps
+    // metadata. totalRgbaBytes is updated.
+    void evictRgba(CostumePixels &cp, const std::string &name);
+
+    // Mark costume as most-recently-used.
+    void touchLru(const std::string &name);
+
+    // Evict from the back of the LRU until totalRgbaBytes < costumeBudgetBytes.
+    void evictUntilUnderBudget();
 
     struct DirtyRect { int16_t x, y, w, h; };
     std::vector<DirtyRect> dirtyRects[2];  // per framebuffer

@@ -141,7 +141,7 @@ static void decode_wav_raw(const uint8_t *data, const WavHeader &wav,
 // In our flow that's g_assets, which is freed AFTER cleanupAudio.
 //
 // Slow path (8-bit, multi-channel, etc.): allocate + decode to mono int16.
-static PCMSound decode_wav(const uint8_t *data, size_t len) {
+static PCMSound decode_wav(const uint8_t *data, size_t len, bool force_copy = false) {
     PCMSound pcm = {};
     WavHeader wav = parse_wav(data, len);
     if (!wav.valid) {
@@ -158,10 +158,21 @@ static PCMSound decode_wav(const uint8_t *data, size_t len) {
         return pcm;
     }
 
-    if (wav.bits_per_sample == 16 && wav.num_channels == 1) {
-        // Borrow source buffer — no PSRAM cost.
+    if (wav.bits_per_sample == 16 && wav.num_channels == 1 && !force_copy) {
+        // Borrow source buffer — no PSRAM cost. Caller must keep `data` alive.
         pcm.samples = (int16_t *)(data + wav.data_offset);
         pcm.samples_owned = false;
+    } else if (wav.bits_per_sample == 16 && wav.num_channels == 1 && force_copy) {
+        // Same layout as fast path but allocate-and-copy so the audio
+        // system owns its PCM independently of `data`'s lifetime.
+        pcm.samples = (int16_t *)heap_caps_malloc((size_t)src_samples * sizeof(int16_t),
+                                                   MALLOC_CAP_SPIRAM);
+        if (!pcm.samples) {
+            ESP_LOGE(TAG, "Failed to alloc owned %d samples", src_samples);
+            return pcm;
+        }
+        memcpy(pcm.samples, data + wav.data_offset, (size_t)src_samples * sizeof(int16_t));
+        pcm.samples_owned = true;
     } else {
         pcm.samples = (int16_t *)heap_caps_malloc(src_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM);
         if (!pcm.samples) {
@@ -453,7 +464,8 @@ void SoundPlayer::startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip,
     }
 }
 
-bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len) {
+bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len,
+                                       bool force_copy) {
     if (!init()) return false;
 
     // Dedup: many sprites in a project share the same sound id (the Ninja demo
@@ -474,7 +486,7 @@ bool SoundPlayer::loadSoundFromMemory(const std::string &soundId, const uint8_t 
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
-    PCMSound pcm = decode_wav(data, len);
+    PCMSound pcm = decode_wav(data, len, force_copy);
     if (!pcm.loaded) {
         ESP_LOGE(TAG, "Failed to decode sound from memory: %s — marking as failed", soundId.c_str());
         if (xSemaphoreTake(s_audio_mutex, portMAX_DELAY) == pdTRUE) {
@@ -522,9 +534,14 @@ int SoundPlayer::playSound(const std::string &soundId) {
             it->second.frac_pos = 0.0f;
             it->second.playing = true;
             xSemaphoreGive(s_audio_mutex);
+            ESP_LOGI(TAG, "playSound OK: %s", soundId.c_str());
             return 0;
         }
+        bool present = (it != s_sounds.end());
+        bool failed_flag = present && it->second.failed;
         xSemaphoreGive(s_audio_mutex);
+        ESP_LOGW(TAG, "playSound MISS: %s (present=%d failed=%d)",
+                 soundId.c_str(), present, failed_flag);
     }
     return -1;
 }

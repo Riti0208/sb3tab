@@ -60,6 +60,24 @@ void sd_save_game(const char *project_id, const char *name,
                   const char *project_json, size_t json_len,
                   const SdAsset *assets, int asset_count);
 
+// Streaming save API for projects too large to hold in PSRAM.
+// Use this trio during a download: begin (creates dirs + name) → save_json
+// once → save_asset N times. The caller is responsible for freeing each
+// asset's PSRAM buffer immediately after save_asset returns.
+bool sd_game_begin(const char *project_id, const char *name);
+bool sd_game_save_json(const char *project_id, const char *json, size_t json_len);
+bool sd_game_save_asset(const char *project_id, const char *asset_name,
+                        const uint8_t *data, size_t len);
+
+// Read one asset from /sd/games/<id>/assets/<name>. Returns malloc'd PSRAM
+// buffer (caller frees with heap_caps_free) and sets *out_len. nullptr on
+// failure.
+uint8_t *sd_read_asset(const char *project_id, const char *asset_name, size_t *out_len);
+
+// Read project.json from SD only — does not touch assets. Returns
+// PSRAM-allocated buffer (caller heap_caps_free) and sets *out_len.
+char *sd_read_project_json(const char *project_id, size_t *out_len);
+
 // Load a project from SD card. Returns allocated JSON string (caller frees).
 // asset_cb is called for each asset file; data is valid only during callback.
 typedef void (*sd_asset_cb_t)(const char *name, const uint8_t *data, size_t len, void *ctx);

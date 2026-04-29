@@ -20,7 +20,16 @@ class SoundPlayer {
      */
     static void startSoundLoaderThread(Sprite *sprite, mz_zip_archive *zip, const std::string &soundId, const bool &streamed = false, const bool &fromProject = true, const bool &fromCache = false);
     static bool loadSoundFromFile(Sprite *sprite, std::string fileName, const bool &streamed = false, const bool &fromCache = false);
-    static bool loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len);
+    /**
+     * @param force_copy when true, the WAV decoder always allocates its own
+     *                   PCM buffer and memcpy's from `data`. Use this when
+     *                   `data` is about to be freed (e.g. read from SD into
+     *                   a temporary buffer); otherwise the fast path borrows
+     *                   `data` and the caller MUST keep it alive for the
+     *                   sound's lifetime.
+     */
+    static bool loadSoundFromMemory(const std::string &soundId, const uint8_t *data, size_t len,
+                                    bool force_copy = false);
     static int playSound(const std::string &soundId);
     static void setSoundVolume(const std::string &soundId, float volume);
     static float getSoundVolume(const std::string &soundId);

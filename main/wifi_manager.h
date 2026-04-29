@@ -25,3 +25,21 @@ void wifi_disconnect();
 uint8_t *wifi_http_get(const char *url, size_t *out_len,
                        std::function<void(size_t, size_t)> progress_cb = nullptr,
                        bool skip_cert_check = false);
+
+// Persistent HTTP session that reuses one TLS connection across many GETs to
+// the same host. Avoids per-request TLS handshake (the dominant cost for
+// downloading many small Scratch assets).
+struct WifiHttpSession;
+
+// Open a session targeting `seed_url` (only the scheme/host/port matter; the
+// initial path is replaced by wifi_http_session_get). Returns nullptr on
+// failure.
+WifiHttpSession *wifi_http_session_open(const char *seed_url);
+
+// Issue a GET on `url` over the session. Same return semantics as
+// wifi_http_get. URL must point at the same host/port as seed_url.
+uint8_t *wifi_http_session_get(WifiHttpSession *s, const char *url, size_t *out_len,
+                               std::function<void(size_t, size_t)> progress_cb = nullptr);
+
+// Close and free the session.
+void wifi_http_session_close(WifiHttpSession *s);

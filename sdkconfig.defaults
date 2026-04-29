@@ -86,3 +86,9 @@ CONFIG_LV_USE_LODEPNG=y
 # frame during focus transitions. 0 = disabled (causes severe lag with PNG icons).
 CONFIG_LV_CACHE_DEF_SIZE=4194304
 CONFIG_LV_IMAGE_HEADER_CACHE_DEF_CNT=16
+
+# Asset download speedup. Reuse one TLS connection across many GETs
+# (wifi_http_session_*) and bump TCP window so each transfer ramps up faster.
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
