@@ -62,6 +62,16 @@ struct ParsedInput {
     std::string blockId;
 };
 
+// Per-block opcode-specific runtime state. Lazy-allocated via Block::op()
+// for the small fraction of blocks that actually wait / glide / repeat.
+struct BlockOpData {
+    double repeatTimes = 0;
+    double waitDuration = 0;
+    double glideStartX = 0, glideStartY = 0;
+    double glideEndX = 0, glideEndY = 0;
+    Timer waitTimer;
+};
+
 struct Block {
     std::string id;
     std::string customBlockId;
@@ -88,17 +98,21 @@ struct Block {
     };
 #endif
 
-    /* variables that some blocks need*/
-    double repeatTimes;
-    double waitDuration;
-    double glideStartX, glideStartY;
-    double glideEndX, glideEndY;
-    Timer waitTimer;
     Block *customBlockPtr = nullptr;
     // Lazy-allocated only for blocks that actually broadcast/switch backdrops
     // (a tiny minority of blocks). Saves ~32 bytes per block in typical projects.
     std::unique_ptr<std::vector<std::pair<Block *, Sprite *>>> broadcastsRun;
     std::unique_ptr<std::vector<std::pair<Block *, Sprite *>>> backdropsRun;
+    // Lazy-allocated opcode runtime state (glide/wait/repeat). Saves ~56
+    // bytes per block for the ~95% of blocks that never use these fields.
+    std::unique_ptr<BlockOpData> opData;
+
+    // Lazily allocate and return the opcode runtime state. Use this on any
+    // read or write of repeatTimes/waitDuration/glide*/waitTimer.
+    BlockOpData &op() {
+        if (!opData) opData = std::make_unique<BlockOpData>();
+        return *opData;
+    }
 
     Block() {
         parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
@@ -112,14 +126,15 @@ struct Block {
 #ifdef ENABLE_CACHING
           handler(other.handler), valueHandler(other.valueHandler), variable(nullptr),
 #endif
-          repeatTimes(other.repeatTimes), waitDuration(other.waitDuration),
-          glideStartX(other.glideStartX), glideStartY(other.glideStartY),
-          glideEndX(other.glideEndX), glideEndY(other.glideEndY),
-          waitTimer(other.waitTimer), customBlockPtr(nullptr) {
+          customBlockPtr(nullptr) {
         if (other.parsedFields) {
             parsedFields = std::make_unique<std::map<std::string, ParsedField>>(*other.parsedFields);
         } else {
             parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
+        }
+
+        if (other.opData) {
+            opData = std::make_unique<BlockOpData>(*other.opData);
         }
 
         if (other.parsedInputs) {
@@ -142,13 +157,7 @@ struct Block {
         std::swap(first.customBlockPtr, second.customBlockPtr);
         std::swap(first.shadow, second.shadow);
         std::swap(first.topLevel, second.topLevel);
-        std::swap(first.repeatTimes, second.repeatTimes);
-        std::swap(first.waitDuration, second.waitDuration);
-        std::swap(first.glideStartX, second.glideStartX);
-        std::swap(first.glideStartY, second.glideStartY);
-        std::swap(first.glideEndX, second.glideEndX);
-        std::swap(first.glideEndY, second.glideEndY);
-        std::swap(first.waitTimer, second.waitTimer);
+        std::swap(first.opData, second.opData);
         std::swap(first.broadcastsRun, second.broadcastsRun);
         std::swap(first.backdropsRun, second.backdropsRun);
 

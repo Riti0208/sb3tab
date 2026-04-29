@@ -21,11 +21,11 @@ SCRATCH_BLOCK(text2speech, speakAndWait) {
     std::string safeName = "t2s_temp_" + std::to_string(h) + ".mp3";
     std::string tempFile = tempDir + safeName;
 
-    if (!fromRepeat || block.repeatTimes >= -1) {
-        block.repeatTimes = -2;
+    if (!fromRepeat || block.op().repeatTimes >= -1) {
+        block.op().repeatTimes = -2;
     }
 
-    if (block.repeatTimes == -2) {
+    if (block.op().repeatTimes == -2) {
         if (SoundPlayer::isSoundPlaying(tempFile)) {
             Log::log("T2S: Currently speaking on other block, skipping");
             BlockExecutor::removeFromRepeatQueue(sprite, &block);
@@ -35,18 +35,18 @@ SCRATCH_BLOCK(text2speech, speakAndWait) {
             Log::log("T2S: sound loaded, playing");
             SoundPlayer::playSound(tempFile);
             BlockExecutor::addToRepeatQueue(sprite, &block);
-            block.repeatTimes = -4;
+            block.op().repeatTimes = -4;
             return BlockResult::RETURN;
         }
-        block.repeatTimes = -3;
+        block.op().repeatTimes = -3;
     }
-    if (block.repeatTimes == -3) {
+    if (block.op().repeatTimes == -3) {
         if (!DownloadManager::init()) return BlockResult::CONTINUE;
         if (OS::fileExists(tempFile) && !DownloadManager::isDownloading(api)) {
             Log::log("T2S audio already downloaded: " + inputString);
             SoundPlayer::startSoundLoaderThread(sprite, &Unzip::zipArchive, tempFile, false, false, true);
             BlockExecutor::addToRepeatQueue(sprite, &block);
-            block.repeatTimes = -4;
+            block.op().repeatTimes = -4;
             return BlockResult::RETURN;
         }
 
@@ -55,16 +55,16 @@ SCRATCH_BLOCK(text2speech, speakAndWait) {
 
             DownloadManager::addDownload(api, tempFile);
             BlockExecutor::addToRepeatQueue(sprite, &block);
-            block.repeatTimes = -3;
+            block.op().repeatTimes = -3;
             return BlockResult::RETURN;
         } else if (DownloadManager::isDownloading(api)) return BlockResult::RETURN;
     }
-    if (block.repeatTimes == -4) {
+    if (block.op().repeatTimes == -4) {
         if (SoundPlayer::isSoundPlaying(tempFile)) return BlockResult::RETURN;
     }
 
     BlockExecutor::removeFromRepeatQueue(sprite, &block);
-    block.repeatTimes = -1;
+    block.op().repeatTimes = -1;
     Log::log("T2S: finished speaking: " + inputString);
 #else
     Log::logWarning("T2S: ENABLE_AUDIO is NOT defined");

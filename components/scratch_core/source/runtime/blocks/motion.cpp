@@ -95,30 +95,30 @@ SCRATCH_BLOCK(motion, glidesecstoxy) {
     if (!fromRepeat) {
 
         double duration = Scratch::getInputValue(block, "SECS", sprite).asDouble();
-        block.waitDuration = duration * 1000; // milliseconds
+        block.op().waitDuration = duration * 1000; // milliseconds
 
-        block.waitTimer.start();
-        block.glideStartX = sprite->xPosition;
-        block.glideStartY = sprite->yPosition;
+        block.op().waitTimer.start();
+        block.op().glideStartX = sprite->xPosition;
+        block.op().glideStartY = sprite->yPosition;
 
         // Get target positions
-        block.glideEndX = Scratch::getInputValue(block, "X", sprite).asDouble();
-        block.glideEndY = Scratch::getInputValue(block, "Y", sprite).asDouble();
+        block.op().glideEndX = Scratch::getInputValue(block, "X", sprite).asDouble();
+        block.op().glideEndY = Scratch::getInputValue(block, "Y", sprite).asDouble();
 
         BlockExecutor::addToRepeatQueue(sprite, const_cast<Block *>(&block));
     }
 
-    const int elapsedTime = block.waitTimer.getTimeMs();
+    const int elapsedTime = block.op().waitTimer.getTimeMs();
 
-    if (elapsedTime >= block.waitDuration) {
-        Scratch::gotoXY(sprite, block.glideEndX, block.glideEndY);
+    if (elapsedTime >= block.op().waitDuration) {
+        Scratch::gotoXY(sprite, block.op().glideEndX, block.op().glideEndY);
 
         BlockExecutor::removeFromRepeatQueue(sprite, &block);
         return BlockResult::CONTINUE;
     }
 
-    double progress = static_cast<double>(elapsedTime) / block.waitDuration;
-    Scratch::gotoXY(sprite, block.glideStartX + (block.glideEndX - block.glideStartX) * progress, block.glideStartY + (block.glideEndY - block.glideStartY) * progress);
+    double progress = static_cast<double>(elapsedTime) / block.op().waitDuration;
+    Scratch::gotoXY(sprite, block.op().glideStartX + (block.op().glideEndX - block.op().glideStartX) * progress, block.op().glideStartY + (block.op().glideEndY - block.op().glideStartY) * progress);
 
     return BlockResult::RETURN;
 }
@@ -126,11 +126,11 @@ SCRATCH_BLOCK(motion, glidesecstoxy) {
 SCRATCH_BLOCK(motion, glideto) {
     if (!fromRepeat) {
         double duration = Scratch::getInputValue(block, "SECS", sprite).asDouble();
-        block.waitDuration = duration * 1000; // Convert to milliseconds
+        block.op().waitDuration = duration * 1000; // Convert to milliseconds
 
-        block.waitTimer.start();
-        block.glideStartX = sprite->xPosition;
-        block.glideStartY = sprite->yPosition;
+        block.op().waitTimer.start();
+        block.op().glideStartX = sprite->xPosition;
+        block.op().glideStartY = sprite->yPosition;
 
         const std::string inputValue = Scratch::getInputValue(block, "TO", sprite).asString();
         double positionXStr = sprite->xPosition;
@@ -151,23 +151,23 @@ SCRATCH_BLOCK(motion, glideto) {
             }
         }
 
-        block.glideEndX = positionXStr;
-        block.glideEndY = positionYStr;
+        block.op().glideEndX = positionXStr;
+        block.op().glideEndY = positionYStr;
 
         BlockExecutor::addToRepeatQueue(sprite, const_cast<Block *>(&block));
     }
 
-    const int elapsedTime = block.waitTimer.getTimeMs();
+    const int elapsedTime = block.op().waitTimer.getTimeMs();
 
-    if (elapsedTime >= block.waitDuration) {
-        Scratch::gotoXY(sprite, block.glideEndX, block.glideEndY);
+    if (elapsedTime >= block.op().waitDuration) {
+        Scratch::gotoXY(sprite, block.op().glideEndX, block.op().glideEndY);
 
         BlockExecutor::removeFromRepeatQueue(sprite, &block);
         return BlockResult::CONTINUE;
     }
 
-    const double progress = static_cast<double>(elapsedTime) / block.waitDuration;
-    Scratch::gotoXY(sprite, block.glideStartX + (block.glideEndX - block.glideStartX) * progress, block.glideStartY + (block.glideEndY - block.glideStartY) * progress);
+    const double progress = static_cast<double>(elapsedTime) / block.op().waitDuration;
+    Scratch::gotoXY(sprite, block.op().glideStartX + (block.op().glideEndX - block.op().glideStartX) * progress, block.op().glideStartY + (block.op().glideEndY - block.op().glideStartY) * progress);
 
     return BlockResult::RETURN;
 }
