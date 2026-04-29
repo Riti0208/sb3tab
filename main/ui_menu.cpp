@@ -28,6 +28,11 @@
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <utility>
+#include <algorithm>
+
+// scratch_core: read the project's gamepad→key auto-mapping table.
+#include <input.hpp>
 
 // Embedded NotoSansJP TTF (linked via EMBED_FILES in scratch_core)
 extern "C" const uint8_t noto_sans_ttf_start[] asm("_binary_NotoSansJP_Medium_subset_ttf_start");
@@ -1231,6 +1236,177 @@ static void build_confirm_screen(const char *title, const char *detail)
 }
 
 // ============================================================
+// Button-map screen: shows the project's auto-mapped gamepad→key pairs
+// using the same kid-friendly card style as build_confirm_screen.
+// ============================================================
+
+// Pretty label for a gamepad button name (left chip).
+static const char *btn_label(const std::string &k) {
+    if (k == "dpadUp")    return LV_SYMBOL_UP;
+    if (k == "dpadDown")  return LV_SYMBOL_DOWN;
+    if (k == "dpadLeft")  return LV_SYMBOL_LEFT;
+    if (k == "dpadRight") return LV_SYMBOL_RIGHT;
+    if (k == "shoulderL") return "LB";
+    if (k == "shoulderR") return "RB";
+    if (k == "start")     return "START";
+    if (k == "back")      return "BACK";
+    return k.c_str(); // A, B, X, Y, LT, RT
+}
+
+// Pretty label for a Scratch key name (right side).
+static std::string key_label(const std::string &k) {
+    if (k == "up arrow")    return LV_SYMBOL_UP;
+    if (k == "down arrow")  return LV_SYMBOL_DOWN;
+    if (k == "left arrow")  return LV_SYMBOL_LEFT;
+    if (k == "right arrow") return LV_SYMBOL_RIGHT;
+    if (k == "space") {
+        switch (lang_get()) {
+            case Lang::JP:    return "スペース";
+            case Lang::KR:    return "스페이스";
+            case Lang::ZH_CN: return "空格";
+            default:          return "Space";
+        }
+    }
+    return k;
+}
+
+// Sort order so D-pad comes first, then face, shoulders, sticks, system.
+static int btn_order(const std::string &k) {
+    if (k == "dpadUp")    return 0;
+    if (k == "dpadDown")  return 1;
+    if (k == "dpadLeft")  return 2;
+    if (k == "dpadRight") return 3;
+    if (k == "A")         return 4;
+    if (k == "B")         return 5;
+    if (k == "X")         return 6;
+    if (k == "Y")         return 7;
+    if (k == "shoulderL") return 8;
+    if (k == "shoulderR") return 9;
+    if (k == "LT")        return 10;
+    if (k == "RT")        return 11;
+    if (k == "start")     return 12;
+    if (k == "back")      return 13;
+    return 99;
+}
+
+static void build_button_map_screen()
+{
+    lv_group_remove_all_objs(s_group);
+    s_scr_status = lv_obj_create(nullptr);
+
+    if (s_confirm_overlay && s_overlay_buf) {
+        lv_obj_set_style_bg_opa(s_scr_status, LV_OPA_TRANSP, 0);
+        lv_obj_t *img = lv_image_create(s_scr_status);
+        lv_image_set_src(img, &s_overlay_dsc);
+        lv_obj_align(img, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+    }
+
+    // Card
+    lv_obj_t *box = lv_obj_create(s_scr_status);
+    lv_obj_remove_style_all(box);
+    lv_obj_add_style(box, &s_style_btn, 0);
+    lv_obj_set_size(box, 720, 600);
+    lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 28, 0);
+
+    // Title
+    lv_obj_t *ttl = lv_label_create(box);
+    lv_label_set_text(ttl, tr(STR_BUTTON_MAP));
+    lv_obj_set_style_text_font(ttl, menu_font(28), 0);
+    lv_obj_set_style_text_color(ttl, lv_color_hex(SCRATCH_TEXT), 0);
+
+    // Snapshot the mapping table sorted by btn_order.
+    std::vector<std::pair<std::string, std::string>> entries(
+        Input::inputControls.begin(), Input::inputControls.end());
+    // Skip stick aliases — D-pad rows already cover the same arrow keys.
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+        [](const std::pair<std::string, std::string> &p) {
+            return p.first.rfind("LeftStick", 0) == 0 ||
+                   p.first.rfind("RightStick", 0) == 0;
+        }), entries.end());
+    std::sort(entries.begin(), entries.end(),
+        [](const std::pair<std::string, std::string> &a,
+           const std::pair<std::string, std::string> &b) {
+            return btn_order(a.first) < btn_order(b.first);
+        });
+
+    // Mapping list
+    lv_obj_t *list = lv_obj_create(box);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+
+    if (entries.empty()) {
+        lv_obj_t *empty = lv_label_create(list);
+        lv_label_set_text(empty, tr(STR_BUTTON_MAP_NONE));
+        lv_obj_set_style_text_font(empty, menu_font(20), 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+    } else {
+        for (auto &e : entries) {
+            lv_obj_t *row = lv_obj_create(list);
+            lv_obj_remove_style_all(row);
+            lv_obj_set_width(row, lv_pct(100));
+            lv_obj_set_height(row, 60);
+            lv_obj_set_style_radius(row, 14, 0);
+            lv_obj_set_style_bg_color(row, lv_color_hex(0xF2F4F8), 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_left(row, 20, 0);
+            lv_obj_set_style_pad_right(row, 20, 0);
+            lv_obj_set_style_pad_column(row, 16, 0);
+
+            // Orange chip with the gamepad button name.
+            lv_obj_t *chip = lv_obj_create(row);
+            lv_obj_remove_style_all(chip);
+            lv_obj_set_size(chip, 110, 44);
+            lv_obj_set_style_radius(chip, 12, 0);
+            lv_obj_set_style_bg_color(chip, lv_color_hex(SCRATCH_ORANGE), 0);
+            lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+            lv_obj_set_style_shadow_color(chip, lv_color_hex(SCRATCH_ORANGE_LT), 0);
+            lv_obj_set_style_shadow_width(chip, 6, 0);
+            lv_obj_set_style_shadow_ofs_y(chip, 2, 0);
+            lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_t *bl = lv_label_create(chip);
+            lv_label_set_text(bl, btn_label(e.first));
+            lv_obj_set_style_text_font(bl, menu_font(20), 0);
+            lv_obj_set_style_text_color(bl, lv_color_hex(SCRATCH_WHITE), 0);
+            lv_obj_center(bl);
+
+            // Arrow separator.
+            lv_obj_t *arr = lv_label_create(row);
+            lv_label_set_text(arr, LV_SYMBOL_RIGHT);
+            lv_obj_set_style_text_font(arr, menu_font(18), 0);
+            lv_obj_set_style_text_color(arr, lv_color_hex(0xB0B6C0), 0);
+
+            // Scratch key label.
+            lv_obj_t *kl = lv_label_create(row);
+            std::string kt = key_label(e.second);
+            lv_label_set_text(kl, kt.c_str());
+            lv_obj_set_style_text_font(kl, menu_font(22), 0);
+            lv_obj_set_style_text_color(kl, lv_color_hex(SCRATCH_TEXT), 0);
+        }
+    }
+
+    // Bottom hint ("B: Close")
+    lv_obj_t *hint = lv_label_create(box);
+    lv_label_set_text(hint, tr(STR_BUTTON_MAP_HINT));
+    lv_obj_set_style_text_font(hint, menu_font(16), 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), 0);
+}
+
+// ============================================================
 // Screen transition helper
 // ============================================================
 
@@ -1616,8 +1792,32 @@ bool ui_show_exit_confirm()
 
 void ui_show_button_map()
 {
-    dsi_modal_show(s_panel, tr(STR_BUTTON_MAP), tr(STR_BUTTON_MAP_DETAIL));
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    // Same flow as ui_show_exit_confirm: capture the current game frame as a
+    // darkened backdrop, then load an LVGL screen that styles the button map
+    // as a kid-friendly card matching the start-menu look.
+    bool was_disabled = s_flush_disabled;
+    capture_game_to_overlay();
+    s_confirm_overlay = true;
+
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    build_button_map_screen();
+    lv_screen_load_anim(s_scr_status, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
+    xSemaphoreGive(s_lvgl_mutex);
+
+    s_flush_disabled = false;
+
+    // Wait for B / BACK / START to dismiss (any "exit" intent).
+    while (true) {
+        InputDev::State gs = InputDev::get();
+        if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    while (InputDev::get().buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    s_confirm_overlay = false;
+    s_flush_disabled = was_disabled;
 }
 
 // ============================================================

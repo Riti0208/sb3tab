@@ -54,6 +54,8 @@ enum StringId {
     STR_NO_WIFI_DETAIL,
     STR_BUTTON_MAP,
     STR_BUTTON_MAP_DETAIL,
+    STR_BUTTON_MAP_HINT,        // "B: とじる"
+    STR_BUTTON_MAP_NONE,        // empty-state line when project uses no keys
     STR_FETCHING_INFO,
     STR_LOADING_JSON,
     STR_ASSETS,
