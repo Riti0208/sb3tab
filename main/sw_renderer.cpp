@@ -25,10 +25,52 @@ static ppa_client_handle_t s_ppa_fill = NULL;
 #define STBI_WRITE_NO_STDIO
 #include "stb_image_write.h"
 
+/* stb_truetype: dsi_modal.cpp uses STBTT_STATIC, so we need our own copy. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#define STBTT_malloc(x,u)  heap_caps_malloc((x), MALLOC_CAP_SPIRAM)
+#define STBTT_free(x,u)    heap_caps_free((x))
+#include "stb_truetype.h"
+#pragma GCC diagnostic pop
+
 #define NANOSVG_IMPLEMENTATION
+#define NANOSVG_TEXT
 #include "nanosvg.h"
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvgrast.h"
+
+/* Embedded TTF blobs (see main/CMakeLists.txt EMBED_FILES) */
+extern const unsigned char font_pixel_start[]    asm("_binary_Grand9KPixel_ttf_start");
+extern const unsigned char font_pixel_end[]      asm("_binary_Grand9KPixel_ttf_end");
+extern const unsigned char font_sans_start[]     asm("_binary_NotoSans_Medium_ttf_start");
+extern const unsigned char font_sans_end[]       asm("_binary_NotoSans_Medium_ttf_end");
+extern const unsigned char font_serif_start[]    asm("_binary_NotoSerif_Regular_ttf_start");
+extern const unsigned char font_serif_end[]      asm("_binary_NotoSerif_Regular_ttf_end");
+/* NotoSansJP-Medium-subset is embedded by scratch_core component */
+extern const unsigned char font_jp_start[]       asm("_binary_NotoSansJP_Medium_subset_ttf_start");
+extern const unsigned char font_jp_end[]         asm("_binary_NotoSansJP_Medium_subset_ttf_end");
+
+static const unsigned char* svg_font_resolver(const char* family, unsigned int cp, int* outSize)
+{
+    /* Map SVG font-family strings to embedded TTFs.
+       For non-ASCII codepoints, fall back to NotoSansJP which covers
+       Latin + Hiragana/Katakana + 500 basic kanji. */
+    bool ascii = (cp < 0x80);
+
+    if (family && (strcmp(family, "Pixel") == 0)) {
+        if (ascii) { *outSize = font_pixel_end - font_pixel_start; return font_pixel_start; }
+        *outSize = font_jp_end - font_jp_start; return font_jp_start;
+    }
+    if (family && (strcmp(family, "Serif") == 0 || strcmp(family, "serif") == 0)) {
+        if (ascii) { *outSize = font_serif_end - font_serif_start; return font_serif_start; }
+        *outSize = font_jp_end - font_jp_start; return font_jp_start;
+    }
+    /* Sans Serif / sans-serif / "" / unknown -> Noto Sans (+ JP fallback) */
+    if (ascii) { *outSize = font_sans_end - font_sans_start; return font_sans_start; }
+    *outSize = font_jp_end - font_jp_start; return font_jp_start;
+}
 
 static const char *TAG = "sw_render";
 
@@ -94,6 +136,8 @@ SWRenderer::SWRenderer() {
     currentFb = 0;
     penFb = nullptr;
     costumeLock = (void *)xSemaphoreCreateMutex();
+
+    nsvgSetFontResolver(svg_font_resolver);
 
     // Init PPA fill client for fast clear
     if (!s_ppa_fill) {

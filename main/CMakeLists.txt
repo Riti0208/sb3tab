@@ -12,6 +12,9 @@ idf_component_register(
          "assets/cursor.wav"
          "assets/select.wav"
          "assets/cancel.wav"
+         "../components/scratch_core/gfx/ingame/fonts/Grand9KPixel.ttf"
+         "../components/scratch_core/gfx/ingame/fonts/NotoSans-Medium.ttf"
+         "../components/scratch_core/gfx/ingame/fonts/NotoSerif-Regular.ttf"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd

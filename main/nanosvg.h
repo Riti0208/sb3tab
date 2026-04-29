@@ -186,6 +186,19 @@ NSVGpath* nsvgDuplicatePath(NSVGpath* p);
 // Deletes an image.
 void nsvgDelete(NSVGimage* image);
 
+#ifdef NANOSVG_TEXT
+/*
+ * Font resolver: caller-provided lookup that returns a pointer to TTF data
+ * for the requested family + codepoint. May return a different font for
+ * fallback (e.g. JP font for non-ASCII). *outSize receives the byte length.
+ * Return NULL to skip this codepoint.
+ */
+typedef const unsigned char* (*NSVGFontResolver)(const char* family,
+                                                 unsigned int codepoint,
+                                                 int* outSize);
+void nsvgSetFontResolver(NSVGFontResolver fn);
+#endif
+
 #ifndef NANOSVG_CPLUSPLUS
 #ifdef __cplusplus
 }
@@ -463,6 +476,17 @@ typedef struct NSVGparser
 	float dpi;
 	char pathFlag;
 	char defsFlag;
+#ifdef NANOSVG_TEXT
+	/* Text rendering state (only used for <text>/<tspan>) */
+	char inText;            /* nesting depth of <text>/<tspan> */
+	char* textBuf;          /* accumulated UTF-8 content */
+	int textBufLen;
+	int textBufCap;
+	float textOriginX;
+	float textOriginY;
+	char textAnchor;        /* 0=start, 1=middle, 2=end */
+	char textFontFamily[32];
+#endif
 } NSVGparser;
 
 static void nsvg__xformIdentity(float* t)
@@ -700,6 +724,9 @@ static void nsvg__deleteParser(NSVGparser* p)
 		nsvg__deleteGradientData(p->gradients);
 		nsvgDelete(p->image);
 		free(p->pts);
+#ifdef NANOSVG_TEXT
+		if (p->textBuf) free(p->textBuf);
+#endif
 		free(p);
 	}
 }
@@ -1863,6 +1890,15 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 		attr->fillRule = nsvg__parseFillRule(value);
 	} else if (strcmp(name, "font-size") == 0) {
 		attr->fontSize = nsvg__parseCoordinate(p, value, 0.0f, nsvg__actualLength(p));
+#ifdef NANOSVG_TEXT
+	} else if (strcmp(name, "font-family") == 0) {
+		strncpy(p->textFontFamily, value, sizeof(p->textFontFamily) - 1);
+		p->textFontFamily[sizeof(p->textFontFamily) - 1] = '\0';
+	} else if (strcmp(name, "text-anchor") == 0) {
+		if (strcmp(value, "middle") == 0) p->textAnchor = 1;
+		else if (strcmp(value, "end") == 0) p->textAnchor = 2;
+		else p->textAnchor = 0;
+#endif
 	} else if (strcmp(name, "transform") == 0) {
 		nsvg__parseTransform(xform, value);
 		nsvg__xformPremultiply(attr->xform, xform);
@@ -2782,6 +2818,160 @@ static void nsvg__parseGradientStop(NSVGparser* p, const char** attr)
 	stop->offset = curAttr->stopOffset;
 }
 
+#ifdef NANOSVG_TEXT
+/* ---- Text rendering (glyph -> NSVGpath via stb_truetype) ---- */
+
+static NSVGFontResolver g_nsvgFontResolver = NULL;
+
+void nsvgSetFontResolver(NSVGFontResolver fn) { g_nsvgFontResolver = fn; }
+
+static int nsvg__utf8Next(const char** s, unsigned int* cp)
+{
+	const unsigned char* q = (const unsigned char*)*s;
+	if (!*q) return 0;
+	unsigned int c = *q++;
+	if (c < 0x80) {
+		*cp = c;
+	} else if ((c & 0xE0) == 0xC0) {
+		*cp = ((c & 0x1F) << 6) | (*q++ & 0x3F);
+	} else if ((c & 0xF0) == 0xE0) {
+		unsigned int b1 = *q++ & 0x3F;
+		unsigned int b2 = *q++ & 0x3F;
+		*cp = ((c & 0x0F) << 12) | (b1 << 6) | b2;
+	} else if ((c & 0xF8) == 0xF0) {
+		unsigned int b1 = *q++ & 0x3F;
+		unsigned int b2 = *q++ & 0x3F;
+		unsigned int b3 = *q++ & 0x3F;
+		*cp = ((c & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3;
+	} else {
+		*cp = '?';
+	}
+	*s = (const char*)q;
+	return 1;
+}
+
+/* Add one glyph's contours to p->plist. Returns advance width in pixels. */
+static float nsvg__emitGlyph(NSVGparser* p, const stbtt_fontinfo* font,
+                             unsigned int cp, float scale, float penX, float penY)
+{
+	int gidx = stbtt_FindGlyphIndex(font, (int)cp);
+	int adv = 0, lsb = 0;
+	stbtt_GetGlyphHMetrics(font, gidx, &adv, &lsb);
+
+	if (gidx == 0) return adv * scale;  /* missing glyph: advance only */
+
+	stbtt_vertex* verts = NULL;
+	int nverts = stbtt_GetGlyphShape(font, gidx, &verts);
+	if (nverts <= 0 || !verts) {
+		if (verts) stbtt_FreeShape(font, verts);
+		return adv * scale;
+	}
+
+	NSVGattrib* a = nsvg__getAttr(p);
+	float saved[6];
+	memcpy(saved, a->xform, sizeof(saved));
+
+	/* Per-glyph: translate(penX, penY) * scale(scale, -scale)
+	   Y is flipped because stb_truetype is Y-up, SVG is Y-down. */
+	float t[6];
+	nsvg__xformSetTranslation(t, penX, penY);
+	nsvg__xformPremultiply(a->xform, t);
+	nsvg__xformSetScale(t, scale, -scale);
+	nsvg__xformPremultiply(a->xform, t);
+
+	float startX = 0, startY = 0;
+	int started = 0;
+	int i;
+	for (i = 0; i < nverts; i++) {
+		stbtt_vertex* v = &verts[i];
+		float x = (float)v->x;
+		float y = (float)v->y;
+		switch (v->type) {
+			case STBTT_vmove:
+				if (started) nsvg__addPath(p, 1);
+				nsvg__resetPath(p);
+				nsvg__moveTo(p, x, y);
+				startX = x; startY = y;
+				started = 1;
+				break;
+			case STBTT_vline:
+				nsvg__lineTo(p, x, y);
+				break;
+			case STBTT_vcurve: {
+				/* Quadratic -> cubic conversion */
+				float cx = (float)v->cx, cy = (float)v->cy;
+				float px, py;
+				if (p->npts > 0) {
+					px = p->pts[(p->npts - 1) * 2 + 0];
+					py = p->pts[(p->npts - 1) * 2 + 1];
+				} else { px = startX; py = startY; }
+				float c1x = px + (2.0f / 3.0f) * (cx - px);
+				float c1y = py + (2.0f / 3.0f) * (cy - py);
+				float c2x = x  + (2.0f / 3.0f) * (cx - x);
+				float c2y = y  + (2.0f / 3.0f) * (cy - y);
+				nsvg__cubicBezTo(p, c1x, c1y, c2x, c2y, x, y);
+				break;
+			}
+			case STBTT_vcubic:
+				nsvg__cubicBezTo(p, (float)v->cx, (float)v->cy,
+				                    (float)v->cx1, (float)v->cy1, x, y);
+				break;
+		}
+	}
+	if (started) nsvg__addPath(p, 1);
+
+	memcpy(a->xform, saved, sizeof(saved));
+	stbtt_FreeShape(font, verts);
+	return adv * scale;
+}
+
+static void nsvg__renderText(NSVGparser* p)
+{
+	if (!p->textBuf || !p->textBufLen || !g_nsvgFontResolver) return;
+
+	NSVGattrib* a = nsvg__getAttr(p);
+	float fontSize = a->fontSize > 0 ? a->fontSize : 12.0f;
+	const char* family = p->textFontFamily[0] ? p->textFontFamily : "";
+
+	/* Two passes: 1) measure total advance for text-anchor.
+	                2) emit glyphs.
+	   Per-codepoint font lookup so JP fallback works. */
+	float totalAdvance = 0;
+	const char* s = p->textBuf;
+	unsigned int cp;
+	while (nsvg__utf8Next(&s, &cp)) {
+		int sz = 0;
+		const unsigned char* data = g_nsvgFontResolver(family, cp, &sz);
+		if (!data || sz <= 0) continue;
+		stbtt_fontinfo font;
+		if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) continue;
+		float scale = stbtt_ScaleForMappingEmToPixels(&font, fontSize);
+		int adv = 0;
+		stbtt_GetCodepointHMetrics(&font, (int)cp, &adv, NULL);
+		totalAdvance += adv * scale;
+	}
+
+	float penX = p->textOriginX;
+	if (p->textAnchor == 1) penX -= totalAdvance * 0.5f;
+	else if (p->textAnchor == 2) penX -= totalAdvance;
+	float penY = p->textOriginY;
+
+	s = p->textBuf;
+	while (nsvg__utf8Next(&s, &cp)) {
+		int sz = 0;
+		const unsigned char* data = g_nsvgFontResolver(family, cp, &sz);
+		if (!data || sz <= 0) continue;
+		stbtt_fontinfo font;
+		if (!stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0))) continue;
+		float scale = stbtt_ScaleForMappingEmToPixels(&font, fontSize);
+		penX += nsvg__emitGlyph(p, &font, cp, scale, penX, penY);
+	}
+
+	if (p->plist) nsvg__addShape(p);
+}
+
+#endif /* NANOSVG_TEXT */
+
 static void nsvg__startElement(void* ud, const char* el, const char** attr)
 {
 	NSVGparser* p = (NSVGparser*)ud;
@@ -2841,6 +3031,34 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
 		p->defsFlag = 1;
 	} else if (strcmp(el, "svg") == 0) {
 		nsvg__parseSVG(p, attr);
+#ifdef NANOSVG_TEXT
+	} else if (strcmp(el, "text") == 0 || strcmp(el, "tspan") == 0) {
+		nsvg__pushAttr(p);
+		/* Reset text-anchor inheritance for nested tspan only when explicitly
+		   re-set; default left as parent text-anchor by parsing below. */
+		float origin[2] = { p->textOriginX, p->textOriginY };
+		int i;
+		for (i = 0; attr[i]; i += 2) {
+			if (strcmp(attr[i], "x") == 0) {
+				origin[0] = nsvg__parseCoordinate(p, attr[i+1], 0.0f, nsvg__actualLength(p));
+			} else if (strcmp(attr[i], "y") == 0) {
+				origin[1] = nsvg__parseCoordinate(p, attr[i+1], 0.0f, nsvg__actualLength(p));
+			} else if (strcmp(attr[i], "dx") == 0) {
+				origin[0] += nsvg__parseCoordinate(p, attr[i+1], 0.0f, nsvg__actualLength(p));
+			} else if (strcmp(attr[i], "dy") == 0) {
+				origin[1] += nsvg__parseCoordinate(p, attr[i+1], 0.0f, nsvg__actualLength(p));
+			} else {
+				nsvg__parseAttr(p, attr[i], attr[i+1]);
+			}
+		}
+		p->textOriginX = origin[0];
+		p->textOriginY = origin[1];
+		p->inText++;
+		if (p->textBufLen && strcmp(el, "text") == 0) {
+			/* New top-level text; clear stale buffer */
+			p->textBufLen = 0;
+		}
+#endif
 	}
 }
 
@@ -2854,14 +3072,42 @@ static void nsvg__endElement(void* ud, const char* el)
 		p->pathFlag = 0;
 	} else if (strcmp(el, "defs") == 0) {
 		p->defsFlag = 0;
+#ifdef NANOSVG_TEXT
+	} else if (strcmp(el, "text") == 0) {
+		nsvg__renderText(p);
+		p->textBufLen = 0;
+		p->textOriginX = 0;
+		p->textOriginY = 0;
+		if (p->inText > 0) p->inText--;
+		nsvg__popAttr(p);
+	} else if (strcmp(el, "tspan") == 0) {
+		if (p->inText > 0) p->inText--;
+		nsvg__popAttr(p);
+#endif
 	}
 }
 
 static void nsvg__content(void* ud, const char* s)
 {
+#ifdef NANOSVG_TEXT
+	NSVGparser* p = (NSVGparser*)ud;
+	if (!p->inText || !s) return;
+	int n = (int)strlen(s);
+	if (p->textBufLen + n + 1 > p->textBufCap) {
+		int nc = p->textBufCap ? p->textBufCap * 2 : 64;
+		while (nc < p->textBufLen + n + 1) nc *= 2;
+		char* nb = (char*)realloc(p->textBuf, nc);
+		if (!nb) return;
+		p->textBuf = nb;
+		p->textBufCap = nc;
+	}
+	memcpy(p->textBuf + p->textBufLen, s, n);
+	p->textBufLen += n;
+	p->textBuf[p->textBufLen] = '\0';
+#else
 	NSVG_NOTUSED(ud);
 	NSVG_NOTUSED(s);
-	// empty
+#endif
 }
 
 static void nsvg__imageBounds(NSVGparser* p, float* bounds)
