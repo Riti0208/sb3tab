@@ -40,9 +40,35 @@ static bool isScriptRunning(Sprite *sprite, Block &block) {
     return chainIt != sprite->blockChains.end() && !chainIt->second.blocksToRepeat.empty();
 }
 
+// Procedures execute on their own blockChainID with their own blocksToRepeat,
+// independent of the caller. So clearing only the hat's chain leaves any
+// procedure's repeat_until / forever as an orphan that runRepeatBlocks keeps
+// invoking each frame. Walk the call graph and clear all transitively-called
+// procedure chains before clearing the caller's own chain.
 static void restartScript(Sprite *sprite, Block &block) {
-    auto chainIt = sprite->blockChains.find(block.blockChainID);
-    if (chainIt != sprite->blockChains.end()) chainIt->second.blocksToRepeat.clear();
+    std::vector<std::string> worklist = {block.blockChainID};
+    std::vector<std::string> toClear;
+    while (!worklist.empty()) {
+        std::string chainId = worklist.back();
+        worklist.pop_back();
+        if (std::find(toClear.begin(), toClear.end(), chainId) != toClear.end()) continue;
+        toClear.push_back(chainId);
+
+        auto it = sprite->blockChains.find(chainId);
+        if (it == sprite->blockChains.end()) continue;
+        for (const auto &blockId : it->second.blocksToRepeat) {
+            auto blockIt = sprite->blocksMap.find(blockId);
+            if (blockIt == sprite->blocksMap.end() || !blockIt->second) continue;
+            Block *b = blockIt->second;
+            if (b->opcode == "procedures_call" && b->customBlockPtr != nullptr) {
+                worklist.push_back(b->customBlockPtr->blockChainID);
+            }
+        }
+    }
+    for (const auto &chainId : toClear) {
+        auto it = sprite->blockChains.find(chainId);
+        if (it != sprite->blockChains.end()) it->second.blocksToRepeat.clear();
+    }
 }
 
 std::unordered_map<std::string, BlockHandlerPtr> &BlockExecutor::getHandlers() {
