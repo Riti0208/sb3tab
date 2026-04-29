@@ -32,3 +32,31 @@ void dsi_display_update(esp_lcd_panel_handle_t panel,
 
 // Set backlight brightness (0-100%)
 void dsi_backlight_set(int percent);
+
+// ============================================================
+// Double buffering API (num_fbs=2)
+//
+// The DPI panel is configured with two framebuffers. At any moment one is
+// being scanned out by the controller (the "front" buffer) and the other
+// is writable by the application (the "back" buffer). Producers should:
+//   1. write pixels into `dsi_get_back_fb()`
+//   2. call `dsi_present(panel)` to publish the back buffer on the next
+//      vsync — the driver flips the front/back assignment, so subsequent
+//      `dsi_get_back_fb()` calls return the *new* writable buffer.
+//
+// Consumers that compose multi-step frames (e.g. PPA camera → CPU overlay
+// → present) should call `dsi_present()` once at the end. Each call is
+// expected to leave the back buffer with a complete frame's worth of
+// pixels — anything not written will be left over from two frames ago.
+// ============================================================
+
+// Returns the framebuffer the application should currently write to.
+void *dsi_get_back_fb();
+
+// Submit the current back buffer for display on the next vsync and swap
+// front/back.
+void dsi_present(esp_lcd_panel_handle_t panel);
+
+// Clear both framebuffers to black. Call when transitioning between scenes
+// where stale pixels from the prior scene should not flash through.
+void dsi_clear_both_fbs(esp_lcd_panel_handle_t panel);

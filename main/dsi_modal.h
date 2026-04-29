@@ -28,3 +28,17 @@ void dsi_qr_overlay(esp_lcd_panel_handle_t panel,
 // the previous call. Use when something else has overwritten the strip
 // region (e.g., a status modal) before re-entering scan.
 void dsi_qr_overlay_invalidate();
+
+// Switch-style chrome top bar drawn directly on DPI FB. Used during QR scan
+// where LVGL is bypassed; with num_fbs=2 it must be redrawn each frame on
+// the new back buffer. `batt_pct` < 0 hides the battery icon; otherwise a
+// small battery rectangle is drawn manually (NotoSansJP doesn't ship the
+// FontAwesome glyphs that LVGL uses, so we can't reuse the same icon char).
+void dsi_qr_top_bar(esp_lcd_panel_handle_t panel,
+                    const char *clock_text,
+                    const char *batt_text,
+                    int batt_pct,
+                    bool batt_charging,
+                    int top_strip_h);
+
+void dsi_qr_top_bar_invalidate();

@@ -279,30 +279,12 @@ static void camera_preview_to_dsi(const uint8_t *cam_frame,
 {
     if (!panel || !s_cam_ppa) return;
 
-    // Get DPI framebuffer
-    void *fb0 = NULL;
-    if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) != ESP_OK || !fb0) return;
+    // Write to the current DPI back buffer (num_fbs=2 — caller will present).
+    void *fb0 = dsi_get_back_fb();
+    if (!fb0) return;
 
-    // PPA SRM: rotate camera 1280x720 RGB565 → 720x1280 DPI (portrait).
-    //
-    // Strips reserved for the static overlay are skipped: the bottom
-    // landscape strip becomes portrait px[0..bottom-1] (left edge), and the
-    // top landscape strip becomes portrait px[720-top..719] (right edge).
-    // We shrink the output rectangle to fit between those edges and scale
-    // the camera to match.
-    //
-    // For 90°/270° rotation the PPA driver maps the scale factors with the
-    // rotated axes: scale_y becomes the OUTPUT-WIDTH multiplier (applied to
-    // input.block_h) and scale_x becomes the OUTPUT-HEIGHT multiplier
-    // (applied to input.block_w). So to shrink output width while keeping
-    // full height we set scale_y < 1 and leave scale_x = 1.
-    int cam_w = DSI_LCD_W - s_strip_top - s_strip_bottom;
-    if (cam_w <= 0) {
-        // Misconfigured strips — fall back to full-screen camera.
-        cam_w = DSI_LCD_W;
-    }
-    float scale_y = (float)cam_w / (float)CAM_H;  // CAM_H = 720, post-rot W
-
+    // PPA SRM: rotate camera 1280x720 RGB565 → 720x1280 DPI (portrait), full
+    // screen. Bars are composited on top by the caller after this returns.
     ppa_srm_oper_config_t srm = {};
 
     srm.in.buffer = cam_frame;
@@ -318,13 +300,13 @@ static void camera_preview_to_dsi(const uint8_t *cam_frame,
     srm.out.buffer_size = DSI_LCD_W * DSI_LCD_H * 2;
     srm.out.pic_w = DSI_LCD_W;
     srm.out.pic_h = DSI_LCD_H;
-    srm.out.block_offset_x = s_strip_bottom;  // bottom landscape strip = portrait left
+    srm.out.block_offset_x = 0;
     srm.out.block_offset_y = 0;
     srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
 
     srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_270;
     srm.scale_x = 1.0f;
-    srm.scale_y = scale_y;
+    srm.scale_y = 1.0f;
     srm.mirror_x = false;
     srm.mirror_y = false;
     srm.rgb_swap = true;   // ST7123 panel expects R↔B swap

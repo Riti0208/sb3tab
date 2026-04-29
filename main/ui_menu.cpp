@@ -10,6 +10,8 @@
 #include "camera_qr.h"
 #include "es8388_audio.h"
 #include "i18n.h"
+#include "battery_monitor.h"
+#include "time_sync.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -219,9 +221,9 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     }
 
     // FULL mode: px_map is the complete 1280x720 landscape buffer.
-    // PPA SRM rotate 270° → 720x1280 portrait DPI framebuffer.
-    void *dpi_fb = nullptr;
-    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &dpi_fb) != ESP_OK || !dpi_fb) {
+    // PPA SRM rotate 270° → 720x1280 portrait DPI back buffer.
+    void *dpi_fb = dsi_get_back_fb();
+    if (!dpi_fb) {
         lv_display_flush_ready(disp);
         return;
     }
@@ -266,6 +268,9 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
         ESP_LOGE(TAG, "LVGL PPA SRM failed: %s", esp_err_to_name(ret));
     }
     xSemaphoreGive(s_lvgl_ppa_done);
+
+    // Submit the back buffer for display, swap.
+    dsi_present(s_panel);
 
     lv_display_flush_ready(disp);
 }
@@ -639,6 +644,183 @@ static lv_obj_t *create_settings_card(lv_obj_t *parent, const char *label_text)
 }
 
 // ============================================================
+// Chrome bars (top: clock + battery, bottom: control hints)
+// Switch-style — added to each menu screen, omitted during gameplay.
+// ============================================================
+
+#define CHROME_BAR_H        56
+#define CHROME_BAR_BG       0x1F4F99   // darker blue than the screen
+#define CHROME_BAR_TEXT     0xFFFFFF
+#define CHROME_BAR_TEXT_DIM 0xB3CDFF
+
+// Pointers to the *currently visible* bar labels. LVGL deletes screens (and
+// these labels) on transition; the LV_EVENT_DELETE callbacks below null these
+// out so the periodic timer doesn't write to freed memory.
+static lv_obj_t *s_clock_label = nullptr;
+static lv_obj_t *s_batt_label  = nullptr;
+
+static void clear_clock_label_cb(lv_event_t *e) {
+    if (lv_event_get_target(e) == s_clock_label) s_clock_label = nullptr;
+}
+static void clear_batt_label_cb(lv_event_t *e) {
+    if (lv_event_get_target(e) == s_batt_label) s_batt_label = nullptr;
+}
+
+// Plain percent text (no FontAwesome icon glyph). Used by both the LVGL
+// chrome bar (which adds the icon as a glyph from Montserrat) and the DPI
+// QR overlay (which draws a battery rectangle manually — NotoSansJP, used
+// by the DPI text rasterizer, doesn't ship FontAwesome glyphs and would
+// render LV_SYMBOL_* as tofu).
+static void format_battery_pct(char *buf, size_t buflen) {
+    if (!battery_is_present()) {
+        snprintf(buf, buflen, " ");
+        return;
+    }
+    int pct = battery_get_percent();
+    if (battery_is_charging()) {
+        snprintf(buf, buflen, "+%d%%", pct);
+    } else {
+        snprintf(buf, buflen, "%d%%", pct);
+    }
+}
+
+static void chrome_tick_cb(lv_timer_t *t) {
+    if (s_clock_label) {
+        char clk[8];
+        time_get_hhmm(clk, sizeof(clk));
+        lv_label_set_text(s_clock_label, clk);
+    }
+    if (s_batt_label) {
+        char b[16];
+        format_battery_pct(b, sizeof(b));
+        lv_label_set_text(s_batt_label, b);
+    }
+    // The battery icon widgets are static within a screen — they're rebuilt
+    // when the screen rebuilds, so the fill bar updates whenever you navigate
+    // between menu screens. Live-updating it within a single screen would
+    // require tracking the rect/nub widget pointers like s_batt_label.
+}
+
+// Convenience: fill `clock`/`batt` with the current chrome-bar text. Shared
+// between the LVGL-side timer (chrome_tick_cb) and the camera-side direct
+// DPI overlay used during QR scan. The DPI side draws a battery rectangle
+// itself, so `batt` is plain percent text without any FontAwesome glyph.
+static void chrome_get_strings(char *clock, size_t clock_len,
+                               char *batt,  size_t batt_len)
+{
+    if (clock) time_get_hhmm(clock, clock_len);
+    if (batt)  format_battery_pct(batt, batt_len);
+}
+
+// Add Switch-style top + bottom bars to a screen. `hint_text` is shown in the
+// bottom bar (replaces the per-screen footer hint). The top bar shows clock
+// (left) and battery (right). Called from each menu screen's build_*().
+static void add_chrome_bars(lv_obj_t *scr, const char *hint_text)
+{
+    // --- Top bar ---
+    lv_obj_t *top = lv_obj_create(scr);
+    lv_obj_remove_style_all(top);
+    lv_obj_set_size(top, lv_pct(100), CHROME_BAR_H);
+    lv_obj_align(top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(top, lv_color_hex(CHROME_BAR_BG), 0);
+    lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+
+    // The chrome bar uses NotoSansJP via lv_tiny_ttf (same TTF + stb_truetype
+    // as the DPI direct-draw side in dsi_modal.cpp), so the QR-scan view and
+    // the menu chrome render at identical pixel size. menu_font() would pick
+    // pre-rasterized Montserrat in EN mode and the two paths would diverge.
+    const lv_font_t *bar_font = get_jp_font(24);
+    if (!bar_font) bar_font = menu_font(24);
+
+    // Clock (left)
+    lv_obj_t *clk = lv_label_create(top);
+    char buf[8];
+    time_get_hhmm(buf, sizeof(buf));
+    lv_label_set_text(clk, buf);
+    lv_obj_set_style_text_color(clk, lv_color_hex(CHROME_BAR_TEXT), 0);
+    lv_obj_set_style_text_font(clk, bar_font, 0);
+    lv_obj_align(clk, LV_ALIGN_LEFT_MID, 24, 0);
+    lv_obj_add_event_cb(clk, clear_clock_label_cb, LV_EVENT_DELETE, nullptr);
+    s_clock_label = clk;
+
+    // Battery (right) — plain percent text. The icon next to it is drawn as
+    // primitive widgets below so it stays in sync with the DPI side, which
+    // also draws a manual rectangle (NotoSansJP has no FontAwesome glyphs).
+    lv_obj_t *batt = lv_label_create(top);
+    char b2[16];
+    format_battery_pct(b2, sizeof(b2));
+    lv_label_set_text(batt, b2);
+    lv_obj_set_style_text_color(batt, lv_color_hex(CHROME_BAR_TEXT), 0);
+    lv_obj_set_style_text_font(batt, bar_font, 0);
+    lv_obj_align(batt, LV_ALIGN_RIGHT_MID, -24, 0);
+    lv_obj_add_event_cb(batt, clear_batt_label_cb, LV_EVENT_DELETE, nullptr);
+    s_batt_label = batt;
+
+    // Battery rect icon: 30x14 outlined body + 4x6 nub on the right + a fill
+    // bar proportional to the current charge. Mirrors dsi_qr_top_bar()'s
+    // primitives so both bars look identical.
+    if (battery_is_present()) {
+        int pct = battery_get_percent();
+        bool chg = battery_is_charging();
+
+        lv_obj_t *body = lv_obj_create(top);
+        lv_obj_remove_style_all(body);
+        lv_obj_set_size(body, 30, 14);
+        lv_obj_set_style_border_color(body, lv_color_hex(CHROME_BAR_TEXT), 0);
+        lv_obj_set_style_border_width(body, 1, 0);
+        lv_obj_set_style_radius(body, 2, 0);
+        lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+        lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+        // Right edge of body sits a few px left of the percent label.
+        lv_obj_align_to(body, batt, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+
+        // Nub (positive terminal): a 4x6 white rect to the right of body.
+        lv_obj_t *nub = lv_obj_create(top);
+        lv_obj_remove_style_all(nub);
+        lv_obj_set_size(nub, 4, 6);
+        lv_obj_set_style_bg_color(nub, lv_color_hex(CHROME_BAR_TEXT), 0);
+        lv_obj_set_style_bg_opa(nub, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(nub, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align_to(nub, body, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
+
+        // Fill bar inside body (inset 2 px). White normally, green when
+        // charging — same convention as the DPI overlay.
+        if (pct > 0) {
+            int fill_w_max = 26;  // 30 body width - 4 (2 px inset each side)
+            int fill_w = fill_w_max * pct / 100;
+            if (fill_w > fill_w_max) fill_w = fill_w_max;
+            if (fill_w < 1) fill_w = 1;
+            lv_obj_t *fill = lv_obj_create(body);
+            lv_obj_remove_style_all(fill);
+            lv_obj_set_size(fill, fill_w, 10);
+            lv_obj_set_style_bg_color(fill,
+                lv_color_hex(chg ? 0x4CBF56 : CHROME_BAR_TEXT), 0);
+            lv_obj_set_style_bg_opa(fill, LV_OPA_COVER, 0);
+            lv_obj_clear_flag(fill, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_align(fill, LV_ALIGN_LEFT_MID, 0, 0);
+        }
+    }
+
+    // --- Bottom bar ---
+    lv_obj_t *bot = lv_obj_create(scr);
+    lv_obj_remove_style_all(bot);
+    lv_obj_set_size(bot, lv_pct(100), CHROME_BAR_H);
+    lv_obj_align(bot, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(bot, lv_color_hex(CHROME_BAR_BG), 0);
+    lv_obj_set_style_bg_opa(bot, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(bot, LV_OBJ_FLAG_SCROLLABLE);
+
+    if (hint_text && hint_text[0]) {
+        lv_obj_t *hint = lv_label_create(bot);
+        lv_label_set_text(hint, hint_text);
+        lv_obj_set_style_text_color(hint, lv_color_hex(CHROME_BAR_TEXT_DIM), 0);
+        lv_obj_set_style_text_font(hint, menu_font(20), 0);
+        lv_obj_center(hint);
+    }
+}
+
+// ============================================================
 // Main Menu Screen
 // ============================================================
 
@@ -685,7 +867,7 @@ static void build_main_menu()
     // Logo image (replaces "ScratchESP" text — 512x128 RGB565A8)
     lv_obj_t *logo = lv_image_create(s_scr_main);
     lv_image_set_src(logo, &ui_logo);
-    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 76);
     lv_obj_clear_flag(logo, LV_OBJ_FLAG_CLICKABLE);
 
     // 3-tile container (horizontal flex, big icon-on-top tiles)
@@ -701,15 +883,12 @@ static void build_main_menu()
     create_tile_btn(cont, &ui_icon_new,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
     create_tile_btn(cont, &ui_icon_settings, tr(STR_MAIN_SETTINGS), on_settings_click);
 
-    // Footer: input device status
-    lv_obj_t *footer = lv_label_create(s_scr_main);
-    lv_obj_set_style_text_color(footer, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(footer, menu_font(14), 0);
-    lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -20);
     bool conn = InputDev::any_connected();
-    lv_label_set_text_fmt(footer, "%s  %s%s", tr(STR_FOOTER_HINT),
-                          conn ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
-                          conn ? tr(STR_GAMEPAD_OK) : tr(STR_GAMEPAD_NONE));
+    char hint[128];
+    snprintf(hint, sizeof(hint), "%s  %s%s", tr(STR_FOOTER_HINT),
+             conn ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE,
+             conn ? tr(STR_GAMEPAD_OK) : tr(STR_GAMEPAD_NONE));
+    add_chrome_bars(s_scr_main, hint);
 }
 
 // ============================================================
@@ -748,7 +927,7 @@ static void build_game_list()
     lv_label_set_text(title, title_buf);
     lv_obj_add_style(title, &s_style_title, 0);
     lv_obj_set_style_text_font(title, menu_font(24), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 68);
 
     // Back button
     lv_obj_t *back_btn = lv_btn_create(s_scr_games);
@@ -756,7 +935,7 @@ static void build_game_list()
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
     lv_obj_set_size(back_btn, 140, 44);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 16);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 64);
     lv_obj_set_style_text_font(back_btn, menu_font(16), 0);
     lv_obj_add_event_cb(back_btn, on_game_list_back, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
@@ -784,8 +963,8 @@ static void build_game_list()
     // Scrollable list container
     lv_obj_t *list = lv_obj_create(s_scr_games);
     lv_obj_remove_style_all(list);
-    lv_obj_set_size(list, lv_pct(90), 560);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_set_size(list, lv_pct(90), 500);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 120);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(list, 8, 0);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
@@ -814,12 +993,7 @@ static void build_game_list()
         lv_group_add_obj(s_group, row);
     }
 
-    // Footer hint
-    lv_obj_t *hint = lv_label_create(s_scr_games);
-    lv_label_set_text(hint, tr(STR_GAMES_HINT));
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(hint, menu_font(14), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
+    add_chrome_bars(s_scr_games, tr(STR_GAMES_HINT));
 }
 
 // ============================================================
@@ -962,14 +1136,14 @@ static void build_settings()
     lv_label_set_text(title, tr(STR_SETTINGS_TITLE));
     lv_obj_add_style(title, &s_style_title, 0);
     lv_obj_set_style_text_font(title, menu_font(28), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 66);
 
     lv_obj_t *back_btn = lv_btn_create(s_scr_settings);
     lv_obj_add_style(back_btn, &s_style_btn, 0);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUSED);
     lv_obj_add_style(back_btn, &s_style_btn_focus, LV_STATE_FOCUS_KEY);
     lv_obj_set_size(back_btn, 140, 48);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 16);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 20, 62);
     lv_obj_set_style_text_font(back_btn, menu_font(18), 0);
     lv_obj_add_event_cb(back_btn, on_settings_back, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
@@ -982,8 +1156,8 @@ static void build_settings()
     // Stacked card column (1180 wide, 4 cards x 110 + 3 x 16 gap = 488 high)
     lv_obj_t *cont = lv_obj_create(s_scr_settings);
     lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, 1180, 504);
-    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 80);
+    lv_obj_set_size(cont, 1180, 488);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 130);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(cont, 16, 0);
 
@@ -1099,12 +1273,7 @@ static void build_settings()
         lv_group_add_obj(s_group, qr_btn);
     }
 
-    // Footer hint
-    lv_obj_t *hint = lv_label_create(s_scr_settings);
-    lv_label_set_text(hint, tr(STR_SETTINGS_HINT));
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xB3CDFF), 0);
-    lv_obj_set_style_text_font(hint, menu_font(14), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
+    add_chrome_bars(s_scr_settings, tr(STR_SETTINGS_HINT));
 }
 
 
@@ -1273,6 +1442,15 @@ static void build_confirm_screen(const char *title, const char *detail)
         lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
     } else {
         lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+    }
+
+    // Switch-style top/bottom bars sit above the dialog.
+    {
+        char hint[96];
+        snprintf(hint, sizeof(hint), LV_SYMBOL_LEFT LV_SYMBOL_RIGHT " %s   "
+                 LV_SYMBOL_OK " %s   " LV_SYMBOL_CLOSE " %s",
+                 tr(STR_BACK), tr(STR_YES), tr(STR_NO));
+        add_chrome_bars(s_scr_status, hint);
     }
 
     lv_obj_t *box = lv_obj_create(s_scr_status);
@@ -1604,6 +1782,10 @@ void ui_init(esp_lcd_panel_handle_t panel)
     // Start LVGL handler task
     xTaskCreatePinnedToCore(lvgl_task_fn, "lvgl", 16384, nullptr, 4, &s_lvgl_task, 1);
 
+    // Periodic refresh for the chrome bars (clock + battery). Runs in the LVGL
+    // task context so label writes are safe without taking s_lvgl_mutex.
+    lv_timer_create(chrome_tick_cb, 5000, nullptr);
+
     // Preload UI sound effects (cursor/select/cancel)
     load_ui_sounds();
 
@@ -1631,55 +1813,57 @@ MenuAction ui_menu_run()
         if (s_state == MenuState::QR_WIFI) {
             // WiFi QR scan — disable LVGL flush (camera owns DPI FB)
             s_flush_disabled = true;
+            dsi_clear_both_fbs(s_panel);
 
             bool wifi_ok = false;
             char ssid[64] = {}, pass[128] = {};
 
             if (camera_init()) {
-                // Carve a 110-px landscape strip at the bottom for the
-                // static overlay so PPA SRM never overwrites it.
-                const int QR_STRIP_H = 110;
-                camera_set_preview_strips(0, QR_STRIP_H);
-                dsi_qr_overlay_invalidate();
-                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_WIFI_HEAD),
-                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
+                // Camera fills the full DPI FB; bars are composited on top
+                // each frame and the back buffer is presented atomically
+                // (num_fbs=2). No strip carving needed.
+                const int QR_STRIP_H = 88;
+                const int QR_TOP_H   = CHROME_BAR_H;
+                camera_set_preview_strips(0, 0);
 
                 char qr_buf[512];
                 while (!wifi_ok) {
-                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel)) {
-                        if (qr_buf[0] == 'W' && qr_buf[1] == ':') {
-                            char *s = qr_buf + 2;
-                            char *nl = strchr(s, '\n');
-                            char *p = (char *)"";
-                            if (nl) { *nl = '\0'; p = nl + 1; }
+                    bool had_frame = camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel);
 
-                            // Modal will overwrite the strip area; mark it
-                            // dirty so we redraw on re-entry below.
-                            dsi_qr_overlay_invalidate();
-                            // Run the connect flow at full screen.
-                            camera_set_preview_strips(0, 0);
+                    // Composite chrome bars over the camera frame in the back
+                    // buffer, then present once.
+                    {
+                        char clk[8], batt[16];
+                        chrome_get_strings(clk, sizeof(clk), batt, sizeof(batt));
+                        int pct = battery_is_present() ? battery_get_percent() : -1;
+                        bool chg = battery_is_charging();
+                        dsi_qr_top_bar(s_panel, clk, batt, pct, chg, QR_TOP_H);
+                    }
+                    dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_WIFI_HEAD),
+                                   tr(STR_QR_HINT_BACK), QR_STRIP_H);
+                    dsi_present(s_panel);
 
-                            dsi_modal_show(s_panel, tr(STR_WIFI_CONNECTING), s);
-                            if (wifi_connect(s, p, 15000)) {
-                                wifi_ok = true;
-                                snprintf(ssid, sizeof(ssid), "%.63s", s);
-                                snprintf(pass, sizeof(pass), "%.127s", p);
-                            } else {
-                                dsi_modal_show(s_panel, tr(STR_WIFI_FAILED),
-                                               tr(STR_WIFI_TRY_AGAIN));
-                                vTaskDelay(pdMS_TO_TICKS(2000));
-                                // Re-arm strip + overlay before resuming scan.
-                                camera_set_preview_strips(0, QR_STRIP_H);
-                                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_WIFI_HEAD),
-                                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
-                            }
+                    if (had_frame && qr_buf[0] == 'W' && qr_buf[1] == ':') {
+                        char *s = qr_buf + 2;
+                        char *nl = strchr(s, '\n');
+                        char *p = (char *)"";
+                        if (nl) { *nl = '\0'; p = nl + 1; }
+
+                        dsi_modal_show(s_panel, tr(STR_WIFI_CONNECTING), s);
+                        if (wifi_connect(s, p, 15000)) {
+                            wifi_ok = true;
+                            snprintf(ssid, sizeof(ssid), "%.63s", s);
+                            snprintf(pass, sizeof(pass), "%.127s", p);
+                        } else {
+                            dsi_modal_show(s_panel, tr(STR_WIFI_FAILED),
+                                           tr(STR_WIFI_TRY_AGAIN));
+                            vTaskDelay(pdMS_TO_TICKS(2000));
                         }
                     }
                     InputDev::State gs = InputDev::get();
                     if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
-                camera_set_preview_strips(0, 0);
                 camera_deinit();
             }
 
@@ -1729,27 +1913,37 @@ MenuAction ui_menu_run()
 
             // Disable LVGL flush during camera (camera owns DPI FB)
             s_flush_disabled = true;
+            dsi_clear_both_fbs(s_panel);
 
             bool got_project = false;
             ESP_LOGI(TAG, "QR: camera_init...");
             if (camera_init()) {
                 ESP_LOGI(TAG, "QR: camera ready, scanning...");
-                const int QR_STRIP_H = 110;
-                camera_set_preview_strips(0, QR_STRIP_H);
-                dsi_qr_overlay_invalidate();
-                dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_PROJECT_HEAD),
-                               tr(STR_QR_HINT_BACK), QR_STRIP_H);
+                const int QR_STRIP_H = 88;
+                const int QR_TOP_H   = CHROME_BAR_H;
+                camera_set_preview_strips(0, 0);
 
                 char qr_buf[512];
                 while (!got_project) {
-                    if (camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel)) {
-                        if (qr_buf[0] == 'S' && qr_buf[1] == ':') {
-                            snprintf(s_selected_project_id, sizeof(s_selected_project_id), "%.63s", qr_buf + 2);
-                            got_project = true;
-                            ESP_LOGI(TAG, "QR: GOT PROJECT %s", s_selected_project_id);
-                        }
+                    bool had_frame = camera_scan_qr(qr_buf, sizeof(qr_buf), s_panel);
+
+                    {
+                        char clk[8], batt[16];
+                        chrome_get_strings(clk, sizeof(clk), batt, sizeof(batt));
+                        int pct = battery_is_present() ? battery_get_percent() : -1;
+                        bool chg = battery_is_charging();
+                        dsi_qr_top_bar(s_panel, clk, batt, pct, chg, QR_TOP_H);
                     }
-                    if (got_project) break;  // exit immediately
+                    dsi_qr_overlay(s_panel, tr(STR_QR_SCAN_PROJECT_HEAD),
+                                   tr(STR_QR_HINT_BACK), QR_STRIP_H);
+                    dsi_present(s_panel);
+
+                    if (had_frame && qr_buf[0] == 'S' && qr_buf[1] == ':') {
+                        snprintf(s_selected_project_id, sizeof(s_selected_project_id), "%.63s", qr_buf + 2);
+                        got_project = true;
+                        ESP_LOGI(TAG, "QR: GOT PROJECT %s", s_selected_project_id);
+                    }
+                    if (got_project) break;
                     InputDev::State gs = InputDev::get();
                     if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
                         ESP_LOGI(TAG, "QR: back button pressed");
@@ -1758,7 +1952,6 @@ MenuAction ui_menu_run()
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 ESP_LOGI(TAG, "QR: calling camera_deinit...");
-                camera_set_preview_strips(0, 0);
                 camera_deinit();
                 ESP_LOGI(TAG, "QR: camera_deinit OK");
             } else {

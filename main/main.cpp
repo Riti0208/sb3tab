@@ -47,7 +47,12 @@
 #include "es8388_audio.h"
 #include "ui_menu.h"
 #include "i18n.h"
+#include "battery_monitor.h"
+#include "time_sync.h"
+#include "driver/i2c_master.h"
 #include <input.hpp>
+
+extern i2c_master_bus_handle_t g_i2c_bus;
 
 // Build for DSI (Tab5) or SPI LCD
 #define USE_DSI_DISPLAY 1
@@ -1232,6 +1237,7 @@ extern "C" void app_main(void)
 #if USE_DSI_DISPLAY
     dsi_panel = dsi_display_init();
     es8388_audio_init();
+    battery_monitor_init(g_i2c_bus);
 #else
     lcd_fb = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
     lcd_panel = lcd_init();
@@ -1257,6 +1263,7 @@ extern "C" void app_main(void)
             ui_show_wifi_connecting(saved_ssid);
             bool ok = wifi_connect(saved_ssid, saved_pass, 10000);
             ui_show_wifi_result(ok, saved_ssid);
+            if (ok) time_sync_start();
             vTaskDelay(pdMS_TO_TICKS(ok ? 1000 : 2000));
         }
     }
@@ -1325,15 +1332,8 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(500));
         ui_suspend();
 
-        // Clear DPI framebuffer to black (remove LVGL UI residue)
-        {
-            void *fb0 = nullptr;
-            if (esp_lcd_dpi_panel_get_frame_buffer(dsi_panel, 1, &fb0) == ESP_OK && fb0) {
-                memset(fb0, 0, DSI_LCD_W * DSI_LCD_H * 2);
-                esp_cache_msync(fb0, DSI_LCD_W * DSI_LCD_H * 2,
-                                ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-            }
-        }
+        // Clear both DPI framebuffers (remove LVGL UI residue)
+        dsi_clear_both_fbs(dsi_panel);
 
         if (load_and_run()) {
             // Game loop: check for Start/Select overlays
@@ -1372,6 +1372,7 @@ extern "C" void app_main(void)
                 ui_show_wifi_connecting(ssid);
                 bool ok = wifi_connect(ssid, pass, 10000);
                 ui_show_wifi_result(ok, ssid);
+                if (ok) time_sync_start();
                 vTaskDelay(pdMS_TO_TICKS(ok ? 1000 : 2000));
             }
         }

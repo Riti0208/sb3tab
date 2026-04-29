@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
+#include "esp_timer.h"
 #include "driver/ppa.h"
 #include "sw_renderer.h"  // for STAGE_W, STAGE_H
 #include <cstring>
@@ -179,9 +180,22 @@ static void enable_dsi_phy_power() {
 // ============================================================
 
 static ppa_client_handle_t s_ppa_srm = NULL;
-static uint16_t *s_dpi_fb = NULL;
+// Double buffering: panel allocates both, we cycle back/front each present.
+static uint16_t *s_dpi_fbs[2] = { NULL, NULL };
+static int       s_dpi_back_idx = 0;
 static uint8_t *s_ppa_src_buf = NULL;          // Intermediate buffer for non-blocking PPA
 static SemaphoreHandle_t s_ppa_done = NULL;     // Signaled when PPA SRM completes
+static SemaphoreHandle_t s_swap_done = NULL;    // Signaled at vsync (DMA frame end)
+static esp_lcd_panel_handle_t s_panel_for_present = NULL;  // cached for dsi_present()
+
+IRAM_ATTR static bool dpi_refresh_done_cb(esp_lcd_panel_handle_t panel,
+                                          esp_lcd_dpi_panel_event_data_t *edata,
+                                          void *user_ctx)
+{
+    BaseType_t woken = pdFALSE;
+    if (s_swap_done) xSemaphoreGiveFromISR(s_swap_done, &woken);
+    return woken == pdTRUE;
+}
 
 static bool ppa_srm_done_cb(ppa_client_handle_t client, ppa_event_data_t *event_data, void *user_data) {
     BaseType_t woken = pdFALSE;
@@ -267,7 +281,7 @@ esp_lcd_panel_handle_t dsi_display_init()
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
         .dpi_clock_freq_mhz = 70,
         .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
-        .num_fbs = 1,
+        .num_fbs = 2,
         .video_timing = {
             .h_size = DSI_LCD_W,
             .v_size = DSI_LCD_H,
@@ -305,6 +319,17 @@ esp_lcd_panel_handle_t dsi_display_init()
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
+    // Register the refresh-done callback so dsi_present() can wait for the
+    // panel's actual buffer swap (next vsync) before letting producers write
+    // to the new back. Without this, the DMA scanout may still be reading
+    // the buffer we just handed back as "back", and concurrent PPA writes
+    // alias as visible smearing on the game.
+    s_swap_done = xSemaphoreCreateBinary();
+    {
+        esp_lcd_dpi_panel_event_callbacks_t cbs = { .on_refresh_done = dpi_refresh_done_cb };
+        esp_lcd_dpi_panel_register_event_callbacks(panel, &cbs, NULL);
+    }
+
     ESP_LOGI(TAG, "ST7123 panel initialized: %dx%d (24bpp, 70MHz, 965Mbps)", DSI_LCD_W, DSI_LCD_H);
 
     // 10. Backlight ON
@@ -331,18 +356,72 @@ esp_lcd_panel_handle_t dsi_display_init()
         ESP_LOGI(TAG, "PPA SRM client registered (async, pipelined)");
     }
 
-    // 12. Get DPI framebuffer pointer and clear to black
+    // 12. Get both DPI framebuffer pointers, clear to black, and present
+    //     once so the back-index is well-defined: after the present below,
+    //     fbs[0] is on screen and fbs[1] is the writable back buffer.
     {
-        void *fb0 = NULL;
-        if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) == ESP_OK && fb0) {
-            s_dpi_fb = (uint16_t *)fb0;
+        void *fb0 = NULL, *fb1 = NULL;
+        if (esp_lcd_dpi_panel_get_frame_buffer(panel, 2, &fb0, &fb1) == ESP_OK && fb0 && fb1) {
+            s_dpi_fbs[0] = (uint16_t *)fb0;
+            s_dpi_fbs[1] = (uint16_t *)fb1;
             memset(fb0, 0, DSI_LCD_W * DSI_LCD_H * 2);
+            memset(fb1, 0, DSI_LCD_W * DSI_LCD_H * 2);
             esp_cache_msync(fb0, DSI_LCD_W * DSI_LCD_H * 2,
                             ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+            esp_cache_msync(fb1, DSI_LCD_W * DSI_LCD_H * 2,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        }
+        s_dpi_back_idx = 0;
+        s_panel_for_present = panel;
+        // Present fbs[0] → idx flips to 1 (writable), front=fbs[0].
+        if (panel && s_dpi_fbs[0]) {
+            esp_lcd_panel_draw_bitmap(panel, 0, 0, DSI_LCD_W, DSI_LCD_H, s_dpi_fbs[0]);
+            s_dpi_back_idx = 1;
         }
     }
 
     return panel;
+}
+
+// ============================================================
+// Double-buffer API
+// ============================================================
+
+void *dsi_get_back_fb()
+{
+    return s_dpi_fbs[s_dpi_back_idx];
+}
+
+void dsi_present(esp_lcd_panel_handle_t panel)
+{
+    if (!panel || !s_dpi_fbs[s_dpi_back_idx]) return;
+    // Submit current back as the new front. The DPI driver only commits the
+    // swap at the next dma_trans_done (= end of current frame refresh), so
+    // until then the buffer we're handing over as "new back" is still being
+    // scanned out. Drain any stale event, then wait for the next refresh
+    // boundary so writers can safely touch the new back buffer.
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, DSI_LCD_W, DSI_LCD_H,
+                              s_dpi_fbs[s_dpi_back_idx]);
+    s_dpi_back_idx ^= 1;
+    if (s_swap_done) {
+        xSemaphoreTake(s_swap_done, 0);                 // drop stale
+        xSemaphoreTake(s_swap_done, pdMS_TO_TICKS(50)); // wait next vsync
+    }
+}
+
+void dsi_clear_both_fbs(esp_lcd_panel_handle_t panel)
+{
+    for (int i = 0; i < 2; i++) {
+        if (s_dpi_fbs[i]) {
+            memset(s_dpi_fbs[i], 0, DSI_LCD_W * DSI_LCD_H * 2);
+            esp_cache_msync(s_dpi_fbs[i], DSI_LCD_W * DSI_LCD_H * 2,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        }
+    }
+    // Submit the current back as front and swap, so the next writer is
+    // guaranteed to land on the off-screen buffer rather than racing the
+    // panel's scan-out.
+    dsi_present(panel);
 }
 
 // ============================================================
@@ -352,16 +431,25 @@ esp_lcd_panel_handle_t dsi_display_init()
 void dsi_display_update(esp_lcd_panel_handle_t panel,
                         const uint8_t *scratch_fb, int src_w, int src_h)
 {
-    if (!panel || !scratch_fb || !s_ppa_srm || !s_dpi_fb) return;
+    if (!panel || !scratch_fb || !s_ppa_srm || !s_dpi_fbs[0]) return;
 
-    // Wait for previous frame's PPA to finish (first frame: semaphore pre-given)
+    // Wait for previous frame's PPA to finish (first frame: semaphore pre-given).
+    // Once it's done, the buffer that PPA wrote to last is fully populated and
+    // ready to present.
     xSemaphoreTake(s_ppa_done, pdMS_TO_TICKS(100));
 
-    // With double buffering, scratch_fb points to the completed frame buffer
-    // which won't be written to until the NEXT next frame, so PPA can read directly.
-    // No memcpy needed!
+    // Present the just-completed frame (current back buffer) and swap so the
+    // new PPA op below targets the *other* buffer — the one DPI is no longer
+    // scanning out.
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, DSI_LCD_W, DSI_LCD_H,
+                              s_dpi_fbs[s_dpi_back_idx]);
+    s_dpi_back_idx ^= 1;
+    if (s_swap_done) {
+        xSemaphoreTake(s_swap_done, 0);
+        xSemaphoreTake(s_swap_done, pdMS_TO_TICKS(50));
+    }
 
-    // PPA SRM: scale + rotate + color convert (non-blocking)
+    // PPA SRM: scale + rotate + color convert (non-blocking) into new back.
     ppa_srm_oper_config_t srm = {};
 
     srm.in.buffer = scratch_fb;
@@ -373,7 +461,7 @@ void dsi_display_update(esp_lcd_panel_handle_t panel,
     srm.in.block_offset_y = 0;
     srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
 
-    srm.out.buffer = s_dpi_fb;
+    srm.out.buffer = s_dpi_fbs[s_dpi_back_idx];
     srm.out.buffer_size = DSI_LCD_W * DSI_LCD_H * 2;
     srm.out.pic_w = DSI_LCD_W;
     srm.out.pic_h = DSI_LCD_H;

@@ -67,6 +67,7 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 
 static const uint16_t CLR_BLUE       = rgb565(0x4C, 0x97, 0xFF);  // SCRATCH_BLUE
 static const uint16_t CLR_BLUE_DARK  = rgb565(0x33, 0x73, 0xCC);
+static const uint16_t CLR_CHROME_BG  = rgb565(0x1F, 0x4F, 0x99);  // matches LVGL chrome bar
 static const uint16_t CLR_YELLOW     = rgb565(0xFF, 0xD8, 0x3D);  // reticle
 static const uint16_t CLR_ORANGE     = rgb565(0xFF, 0x8C, 0x1A);
 static const uint16_t CLR_WHITE      = rgb565(0xFF, 0xFF, 0xFF);
@@ -195,7 +196,12 @@ static TextEntry *render_text(const char *text, int size_px)
         }
     }
 
-    float scale = stbtt_ScaleForPixelHeight(&s_font, (float)size_px);
+    // Use the same scale convention as lv_tiny_ttf (which LVGL menu chrome
+    // uses) so a numeric "size" value renders identical glyph heights on
+    // both paths. Earlier we used ScaleForPixelHeight which is ~1.39x smaller
+    // for NotoSansJP — that's why the menu chrome looked bigger than the
+    // DPI overlay at the same nominal size.
+    float scale = stbtt_ScaleForMappingEmToPixels(&s_font, (float)size_px);
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &lineGap);
     int baseline = (int)(scale * ascent + 0.5f);
@@ -317,13 +323,12 @@ static void blit_text_land(uint16_t *fb, const TextEntry *te,
     }
 }
 
-// Get framebuffer (DPI panel back buffer 1) with cache flush at end.
+// Returns the DPI back buffer (where the application should write pixels).
+// With num_fbs=2 in dsi_display, this alternates each call to dsi_present().
 static uint16_t *get_fb(esp_lcd_panel_handle_t panel)
 {
-    void *fb0 = nullptr;
     if (!panel) return nullptr;
-    if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) != ESP_OK) return nullptr;
-    return (uint16_t *)fb0;
+    return (uint16_t *)dsi_get_back_fb();
 }
 
 static void flush_fb(uint16_t *fb)
@@ -363,7 +368,7 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
 
     // Title in the blue header
     if (title) {
-        TextEntry *te = render_text(title, 44);
+        TextEntry *te = render_text(title, 32);
         if (te) {
             int tx = card_x + (card_w - te->w) / 2;
             int ty = card_y + (hdr_h - te->h) / 2 + 4;
@@ -373,7 +378,7 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
 
     // Detail line below header
     if (detail) {
-        TextEntry *te = render_text(detail, 32);
+        TextEntry *te = render_text(detail, 23);
         if (te) {
             int tx = card_x + (card_w - te->w) / 2;
             int ty = card_y + hdr_h + (card_h - hdr_h - te->h) / 2;
@@ -382,6 +387,7 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
     }
 
     flush_fb(fb);
+    dsi_present(panel);
 }
 
 // ============================================================
@@ -410,7 +416,7 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
     fill_rect_land(fb, card_x + 4, card_y + hdr_h - 36, card_w - 8, 36, CLR_BLUE);
 
     if (title) {
-        TextEntry *te = render_text(title, 40);
+        TextEntry *te = render_text(title, 29);
         if (te) {
             int tx = card_x + (card_w - te->w) / 2;
             int ty = card_y + (hdr_h - te->h) / 2 + 4;
@@ -440,7 +446,7 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
     } else {
         snprintf(pct, sizeof(pct), "%d ...", current);
     }
-    TextEntry *te = render_text(pct, 26);
+    TextEntry *te = render_text(pct, 19);
     if (te) {
         int tx = card_x + (card_w - te->w) / 2;
         int ty = bar_y + bar_h + 30;
@@ -448,6 +454,7 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
     }
 
     flush_fb(fb);
+    dsi_present(panel);
 }
 
 // ============================================================
@@ -467,18 +474,10 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
 // overlay stays stable with zero per-frame work.
 // ============================================================
 
-// Track the strip we last drew so a repeat call with the same args becomes
-// a no-op. Caller can flag via dsi_qr_overlay_invalidate() when something
-// else (e.g. a status modal) has overwritten the strip in the meantime.
-static char s_strip_headline[TEXT_CACHE_KEYLEN] = {};
-static char s_strip_hint    [TEXT_CACHE_KEYLEN] = {};
-static int  s_strip_h       = -1;
-static bool s_strip_drawn   = false;
-
-void dsi_qr_overlay_invalidate()
-{
-    s_strip_drawn = false;
-}
+// num_fbs=2 means each call alternates back buffers — there's no longer a
+// stable "drawn once" state to short-circuit on. Kept as a no-op so callers
+// (which were written for the num_fbs=1 era) compile unchanged.
+void dsi_qr_overlay_invalidate() {}
 
 void dsi_qr_overlay(esp_lcd_panel_handle_t panel,
                     const char *headline, const char *hint,
@@ -486,78 +485,141 @@ void dsi_qr_overlay(esp_lcd_panel_handle_t panel,
 {
     if (bottom_strip_h <= 0) return;
 
-    const char *h_now = headline ? headline : "";
-    const char *t_now = hint     ? hint     : "";
-    if (s_strip_drawn &&
-        s_strip_h == bottom_strip_h &&
-        strncmp(s_strip_headline, h_now, sizeof(s_strip_headline)) == 0 &&
-        strncmp(s_strip_hint,     t_now, sizeof(s_strip_hint))     == 0) {
-        return;  // Already on screen.
-    }
-
+    // With num_fbs=2 the back buffer alternates each present, so the args
+    // cache from the num_fbs=1 era no longer applies — every call has to
+    // redraw on the new back buffer (the strip on the OTHER buffer is from
+    // two frames ago). The *_invalidate API stays as a no-op for callers.
     uint16_t *fb = get_fb(panel);
     if (!fb) return;
 
-    // Strip occupies landscape ly[LAND_H - bottom_strip_h .. LAND_H - 1],
-    // which after the 90°-CW rotation is portrait px[0 .. bottom_strip_h - 1]
-    // for every portrait row. We iterate landscape-X outer (= portrait-Y
-    // outer) so each iteration writes a contiguous run of bytes inside one
-    // portrait row, which is cache-friendly.
     int strip_top_ly = LAND_H - bottom_strip_h;
-    uint16_t accent  = rgb565(0x33, 0x73, 0xCC);  // CLR_BLUE_DARK, top divider
+    int draw_h = bottom_strip_h;
 
     for (int lx = 0; lx < LAND_W; lx++) {
-        // Convert landscape column lx → portrait row py=lx, px range
-        // [0, bottom_strip_h - 1] (=719-ly walks from 0 upward as ly walks
-        // down from LAND_H-1).
         size_t base = (size_t)lx * DSI_LCD_W;
-        for (int px = 0; px < bottom_strip_h; px++) {
-            // px=0 corresponds to landscape ly=LAND_H-1 (very bottom);
-            // px=bottom_strip_h-1 is one row below the divider.
-            fb[base + px] = CLR_BLUE;
-        }
-        // 1-pixel darker accent line at the very top of the strip
-        fb[base + bottom_strip_h - 1] = accent;
-    }
-
-    // Headline centered horizontally in the strip
-    if (headline && *headline) {
-        TextEntry *te = render_text(headline, 38);
-        if (te) {
-            int tx = (LAND_W - te->w) / 2;
-            int ty = strip_top_ly + (bottom_strip_h - te->h) / 2;
-            blit_text_land(fb, te, tx, ty, CLR_WHITE);
+        for (int px = 0; px < draw_h; px++) {
+            fb[base + px] = CLR_CHROME_BG;
         }
     }
 
-    // Hint right-aligned, smaller
-    if (hint && *hint) {
-        TextEntry *te = render_text(hint, 24);
-        if (te) {
-            int tx = LAND_W - te->w - 36;
-            int ty = strip_top_ly + (bottom_strip_h - te->h) / 2 + 1;
-            blit_text_land(fb, te, tx, ty, CLR_YELLOW);
-        }
+    // 2-line layout: headline centered (line 1), hint right-aligned smaller
+    // and a touch yellow (line 2). Tuned for ~88px strip; on smaller strips
+    // we still center the headline and tuck the hint near the right edge.
+    TextEntry *te_head = (headline && *headline) ? render_text(headline, 26) : nullptr;
+    TextEntry *te_hint = (hint     && *hint)     ? render_text(hint,     16) : nullptr;
+
+    int total_h = (te_head ? te_head->h : 0)
+                + (te_hint ? te_hint->h + 4 : 0);
+    int stack_top = strip_top_ly + (bottom_strip_h - total_h) / 2;
+    if (stack_top < strip_top_ly) stack_top = strip_top_ly;
+
+    if (te_head) {
+        int tx = (LAND_W - te_head->w) / 2;
+        int ty = stack_top;
+        blit_text_land(fb, te_head, tx, ty, CLR_WHITE);
+    }
+    if (te_hint) {
+        int tx = LAND_W - te_hint->w - 36;
+        int ty = stack_top + (te_head ? te_head->h + 4 : 0);
+        blit_text_land(fb, te_hint, tx, ty, CLR_YELLOW);
     }
 
-    // Flush the touched portrait region. The strip lives in portrait
-    // px[0..bottom_strip_h-1] across every row, so cover full portrait
-    // height with a tight column-stride msync per row. With ~110 px
-    // strip × 1280 rows, that's ~280 KB total — much smaller than the
-    // 1.8 MB full-FB flush, and it's a one-shot cost (we won't redraw
-    // until the strip is invalidated).
-    size_t row_bytes = (size_t)bottom_strip_h * 2;
+    // Flush the touched portrait region.
+    size_t row_bytes = (size_t)draw_h * 2;
     for (int py = 0; py < DSI_LCD_H; py++) {
         size_t off = (size_t)py * DSI_LCD_W * 2;
         esp_cache_msync((uint8_t *)fb + off, row_bytes,
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M |
                         ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     }
+}
 
-    strncpy(s_strip_headline, h_now, sizeof(s_strip_headline) - 1);
-    s_strip_headline[sizeof(s_strip_headline) - 1] = '\0';
-    strncpy(s_strip_hint, t_now, sizeof(s_strip_hint) - 1);
-    s_strip_hint[sizeof(s_strip_hint) - 1] = '\0';
-    s_strip_h     = bottom_strip_h;
-    s_strip_drawn = true;
+// ============================================================
+// Public: Switch-style top bar (clock + battery) for QR scan
+// ============================================================
+
+// See dsi_qr_overlay_invalidate notes — kept as no-op.
+void dsi_qr_top_bar_invalidate() {}
+
+void dsi_qr_top_bar(esp_lcd_panel_handle_t panel,
+                    const char *clock_text,
+                    const char *batt_text,
+                    int batt_pct,
+                    bool batt_charging,
+                    int top_strip_h)
+{
+    if (top_strip_h <= 0) return;
+
+    uint16_t *fb = get_fb(panel);
+    if (!fb) return;
+
+    // Top strip occupies landscape ly[0..top_strip_h-1], which after 90°-CW
+    // rotation maps to portrait px[LAND_H-top_strip_h..LAND_H-1] for every
+    // portrait row. Same chrome dark-blue (#1F4F99) as the LVGL menu bars
+    // so the QR scan and menu screens read as one design.
+    int draw_h = top_strip_h;
+    for (int lx = 0; lx < LAND_W; lx++) {
+        size_t base = (size_t)lx * DSI_LCD_W;
+        for (int ly = 0; ly < draw_h; ly++) {
+            int px = LAND_H - 1 - ly;
+            fb[base + px] = CLR_CHROME_BG;
+        }
+    }
+
+    // Clock — left-aligned, white. Match the LVGL chrome (Montserrat 24)
+    // so the QR view and the menu chrome read the same.
+    if (clock_text && *clock_text) {
+        TextEntry *te = render_text(clock_text, 24);
+        if (te) {
+            int tx = 24;
+            int ty = (top_strip_h - te->h) / 2;
+            blit_text_land(fb, te, tx, ty, CLR_WHITE);
+        }
+    }
+
+    // Battery — right-aligned. Layout: [icon ▭][gap][text "100%"]. Icon is a
+    // 30x14 rounded outlined rect with a 4px nub on the right and a fill bar
+    // proportional to batt_pct.
+    if (batt_pct >= 0) {
+        TextEntry *te = (batt_text && *batt_text) ? render_text(batt_text, 24) : nullptr;
+        const int ICON_W = 30, ICON_H = 14, NUB_W = 4, NUB_H = 6;
+        const int GAP = 6;
+        int total_w = ICON_W + NUB_W + GAP + (te ? te->w : 0);
+        int x = LAND_W - total_w - 24;
+        int icon_y = (top_strip_h - ICON_H) / 2;
+
+        // Outline (1 px white)
+        fill_rect_land(fb, x, icon_y, ICON_W, 1, CLR_WHITE);                // top
+        fill_rect_land(fb, x, icon_y + ICON_H - 1, ICON_W, 1, CLR_WHITE);    // bottom
+        fill_rect_land(fb, x, icon_y, 1, ICON_H, CLR_WHITE);                 // left
+        fill_rect_land(fb, x + ICON_W - 1, icon_y, 1, ICON_H, CLR_WHITE);    // right
+        // Positive terminal nub
+        fill_rect_land(fb, x + ICON_W, icon_y + (ICON_H - NUB_H) / 2,
+                        NUB_W, NUB_H, CLR_WHITE);
+        // Fill bar (inset 2 px). Charging shows full green; otherwise white.
+        int fill_w_max = ICON_W - 4;
+        int fill_w = (batt_pct >= 0 && batt_pct <= 100)
+                     ? (fill_w_max * batt_pct / 100) : 0;
+        if (fill_w > 0) {
+            uint16_t fill_col = batt_charging ? CLR_GREEN : CLR_WHITE;
+            fill_rect_land(fb, x + 2, icon_y + 2, fill_w, ICON_H - 4, fill_col);
+        }
+
+        if (te) {
+            int tx = x + ICON_W + NUB_W + GAP;
+            int ty = (top_strip_h - te->h) / 2;
+            blit_text_land(fb, te, tx, ty, CLR_WHITE);
+        }
+    }
+
+    // Flush only the touched portrait region: rows [LAND_H-draw_h .. LAND_H-1]
+    // sit at the high end of every portrait scanline.
+    size_t row_bytes = (size_t)draw_h * 2;
+    size_t row_off   = (size_t)(LAND_H - draw_h) * 2;
+    for (int py = 0; py < DSI_LCD_H; py++) {
+        size_t off = (size_t)py * DSI_LCD_W * 2 + row_off;
+        esp_cache_msync((uint8_t *)fb + off, row_bytes,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    }
 }
