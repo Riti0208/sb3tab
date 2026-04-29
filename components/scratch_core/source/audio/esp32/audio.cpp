@@ -207,8 +207,10 @@ static PCMSound decode_wav(const uint8_t *data, size_t len, bool force_copy = fa
 // fragmented (largest contiguous block is much smaller than total free), and a
 // realloc that has to copy a multi-MB buffer to a fresh region temporarily
 // needs old+new bytes simultaneously — which often won't fit even though the
-// final result would. Pass 1 is cheap relative to pass 2 because we discard
-// the PCM into a scratch frame buffer and skip the per-sample mono downmix.
+// final result would. Pass 1 calls mp3dec_decode_frame with pcm=NULL: minimp3
+// returns the per-frame sample count from the header without running synthesis
+// (huffman/IMDCT/QMF), so pass 1 is roughly an order of magnitude cheaper than
+// pass 2 — critical for multi-MB BGM where the full decode dominates load time.
 static bool decode_mp3_to_pcm(const uint8_t *data, size_t len, PCMSound &pcm) {
     int16_t frame_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
@@ -225,7 +227,8 @@ static bool decode_mp3_to_pcm(const uint8_t *data, size_t len, PCMSound &pcm) {
         size_t remain = len;
         while (remain > 0) {
             mp3dec_frame_info_t info = {};
-            int samples_per_ch = mp3dec_decode_frame(&mp3d, p, (int)remain, frame_pcm, &info);
+            // pcm=NULL → header-only path, returns samples-per-channel without decode.
+            int samples_per_ch = mp3dec_decode_frame(&mp3d, p, (int)remain, nullptr, &info);
             if (info.frame_bytes <= 0) break;
             p += info.frame_bytes;
             remain = ((size_t)info.frame_bytes <= remain) ? remain - (size_t)info.frame_bytes : 0;
