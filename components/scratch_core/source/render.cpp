@@ -488,18 +488,34 @@ void Render::renderMonitors(const int &offsetX, const int &offsetY) {
                     valueObj->setColor(Math::color(255, 255, 255, 255));
                     valueObj->setScale(1.0f * (scale / 2.0f));
 
+#ifdef RENDERER_HEADLESS
+                    // Headless: project 480×360 -> FB 384×288 (LOGICAL_TO_FB).
+                    // Compress X so monitors match the stage region, but
+                    // dial it back from the strict 0.8 (felt too far left).
+                    // Headless text renders at fixed 14px regardless of
+                    // scale, so add extra vertical padding for readability.
+                    baseRenderX = projectX * 0.7f + barOffsetX;
+                    const float boxPadX = 14 * scale;
+                    const float boxPadY = 16 * scale;
+                    const float valuePadX = 10 * scale;
+#else
+                    const float boxPadX = 14 * scale;
+                    const float boxPadY = 6 * scale;
+                    const float valuePadX = 8 * scale;
+#endif
+
                     float monitorWidth = 8 * scale;
-                    float valueWidth = std::max(40 * scale, valueSizeBox[0] + (8 * scale));
+                    float valueWidth = std::max(40 * scale, valueSizeBox[0] + valuePadX);
 
                     // Draw name background
                     float nameBackgroundX = baseRenderX + monitorWidth;
                     float nameBackgroundY = baseRenderY + 4 * scale;
                     float nameBackgroundWidth = nameSizeBox[0] + valueWidth;
                     float nameBackgroundHeight = std::max(nameSizeBox[1], valueSizeBox[1]);
-                    drawBox(nameBackgroundWidth + (14 * scale), nameBackgroundHeight + (6 * scale),
+                    drawBox(nameBackgroundWidth + boxPadX, nameBackgroundHeight + boxPadY,
                             nameBackgroundX + 2 + nameBackgroundWidth / 2, nameBackgroundY + nameBackgroundHeight / 2,
                             194, 204, 217);
-                    drawBox(nameBackgroundWidth + (12 * scale), nameBackgroundHeight + (4 * scale),
+                    drawBox(nameBackgroundWidth + (boxPadX - 2 * scale), nameBackgroundHeight + (boxPadY - 2 * scale),
                             nameBackgroundX + 2 + nameBackgroundWidth / 2, nameBackgroundY + nameBackgroundHeight / 2,
                             229, 240, 255);
 
@@ -508,12 +524,20 @@ void Render::renderMonitors(const int &offsetX, const int &offsetY) {
                     // Draw value background
                     float valueBackgroundX = baseRenderX + monitorWidth;
                     float valueBackgroundY = baseRenderY + 4 * scale;
-                    drawBox(valueWidth, valueSizeBox[1],
+                    drawBox(valueWidth, valueSizeBox[1] + (boxPadY - 6 * scale),
                             valueBackgroundX + valueWidth / 2, valueBackgroundY + valueSizeBox[1] / 2,
                             valueBackgroundColor.r, valueBackgroundColor.g, valueBackgroundColor.b);
 
-                    nameObj->render(nameBackgroundX, nameBackgroundY + (2 * scale));
-                    valueObj->render(valueBackgroundX + (valueWidth / 2) - (valueSizeBox[0] / 2), valueBackgroundY + (2 * scale));
+#ifdef RENDERER_HEADLESS
+                    // Center text vertically inside the larger headless box
+                    // (boxPadY=16 instead of 6, so the original +2 offset
+                    // ended up below the box center).
+                    const float textYOffset = 0;
+#else
+                    const float textYOffset = 2 * scale;
+#endif
+                    nameObj->render(nameBackgroundX, nameBackgroundY + textYOffset);
+                    valueObj->render(valueBackgroundX + (valueWidth / 2) - (valueSizeBox[0] / 2), valueBackgroundY + textYOffset);
                 }
             }
         } else {

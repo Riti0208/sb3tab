@@ -697,6 +697,9 @@ static bool load_and_run()
     esp_task_wdt_deinit();
 
     Scratch::sprites.clear();
+    Render::monitors.clear();
+    Render::monitorTexts.clear();
+    Render::listMonitors.clear();
     SoundPlayer::cleanupAudio();
 
     // Initialize headless renderer (creates WindowHeadless)

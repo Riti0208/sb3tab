@@ -34,7 +34,7 @@ bool g_font_loaded = false;
 float g_font_scale = 0;
 static const float FONT_SIZE = 14.0f; // pixels
 
-static void ensureFontLoaded() {
+void ensureFontLoaded() {
     if (g_font_loaded) return;
 
 #ifdef __ESP32__

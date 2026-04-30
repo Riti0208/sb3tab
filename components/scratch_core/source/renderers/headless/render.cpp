@@ -4,6 +4,7 @@
 #include <window.hpp>
 #include <windowing/headless/window.hpp>
 #include <color.hpp>
+#include <algorithm>
 #include "speech_manager_headless.hpp"
 #include "headless_fb.hpp"
 
@@ -178,8 +179,50 @@ void Render::drawBox(int w, int h, int x, int y, uint8_t colorR, uint8_t colorG,
         // Simple alpha: skip if fully transparent
         if (colorA == 0) return;
     }
-    fillRectFb(g_headless_fb.fb, g_headless_fb.width, g_headless_fb.height,
-               left, top, w, h, colorR, colorG, colorB);
+    int radius = 0;
+    if (w >= 12 && h >= 12) {
+        radius = std::min({3, w / 2, h / 2});
+    }
+    int fbW = g_headless_fb.width;
+    int fbH = g_headless_fb.height;
+    if (radius == 0) {
+        fillRectFb(g_headless_fb.fb, fbW, fbH, left, top, w, h, colorR, colorG, colorB);
+        return;
+    }
+    fillRectFb(g_headless_fb.fb, fbW, fbH, left, top + radius, w, h - 2 * radius,
+               colorR, colorG, colorB);
+    fillRectFb(g_headless_fb.fb, fbW, fbH, left + radius, top, w - 2 * radius, radius,
+               colorR, colorG, colorB);
+    fillRectFb(g_headless_fb.fb, fbW, fbH, left + radius, top + h - radius, w - 2 * radius, radius,
+               colorR, colorG, colorB);
+    int r2 = radius * radius;
+    for (int cy = 0; cy < radius; cy++) {
+        int dy = radius - cy;
+        for (int cx = 0; cx < radius; cx++) {
+            int dx = radius - cx;
+            if (dx * dx + dy * dy > r2) continue;
+            int px = left + cx, py = top + cy;
+            if (px >= 0 && px < fbW && py >= 0 && py < fbH) {
+                uint8_t *d = g_headless_fb.fb + (py * fbW + px) * 3;
+                d[0] = colorR; d[1] = colorG; d[2] = colorB;
+            }
+            px = left + w - 1 - cx;
+            if (px >= 0 && px < fbW && py >= 0 && py < fbH) {
+                uint8_t *d = g_headless_fb.fb + (py * fbW + px) * 3;
+                d[0] = colorR; d[1] = colorG; d[2] = colorB;
+            }
+            py = top + h - 1 - cy; px = left + cx;
+            if (px >= 0 && px < fbW && py >= 0 && py < fbH) {
+                uint8_t *d = g_headless_fb.fb + (py * fbW + px) * 3;
+                d[0] = colorR; d[1] = colorG; d[2] = colorB;
+            }
+            px = left + w - 1 - cx;
+            if (px >= 0 && px < fbW && py >= 0 && py < fbH) {
+                uint8_t *d = g_headless_fb.fb + (py * fbW + px) * 3;
+                d[0] = colorR; d[1] = colorG; d[2] = colorB;
+            }
+        }
+    }
 }
 
 bool Render::appShouldRun() {
