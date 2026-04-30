@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <linux/videodev2.h>
 #include <cstring>
+#include <cerrno>
 #include "quirc.h"
 #include "dsi_modal.h"
 #include "esp_video_isp_ioctl.h"
@@ -225,14 +226,13 @@ bool camera_init()
     ESP_ERROR_CHECK(ppa_register_client(&ppa_cfg, &s_cam_ppa));
 
     // Manual ISP tuning: white balance + brightness
-    // Note: PPA rgb_swap inverts R↔B, so ISP red_gain → screen blue, ISP blue_gain → screen red
     int isp_fd = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
     if (isp_fd >= 0) {
         // White balance: fix green tint from Bayer BGGR demosaic
         esp_video_isp_wb_t wb = {};
         wb.enable = true;
-        wb.red_gain = 1.2f;   // screen blue boost
-        wb.blue_gain = 1.6f;  // screen red boost
+        wb.red_gain = 1.6f;
+        wb.blue_gain = 1.2f;
 
         struct v4l2_ext_control control = {};
         control.id = V4L2_CID_USER_ESP_ISP_WB;
@@ -250,20 +250,54 @@ bool camera_init()
             ESP_LOGW(TAG, "ISP WB set failed");
         }
 
-        // Brightness: compensate for no auto-exposure (range: -128 to 127)
-        struct v4l2_control brightness = {};
-        brightness.id = V4L2_CID_BRIGHTNESS;
-        brightness.value = 50;
-
-        if (ioctl(isp_fd, VIDIOC_S_CTRL, &brightness) == 0) {
-            ESP_LOGI(TAG, "ISP brightness set: %ld", (long)brightness.value);
-        } else {
-            ESP_LOGW(TAG, "ISP brightness set failed");
-        }
-
         close(isp_fd);
     } else {
         ESP_LOGW(TAG, "Could not open ISP device");
+    }
+
+    // SC202CS has no built-in AE/AGC: bump exposure near max and add analog
+    // gain so indoor scenes are not crushed black. esp_video only implements
+    // the EXT_CTRLS variant — VIDIOC_S_CTRL/VIDIOC_QUERYCTRL silently no-op.
+    {
+        auto set_ext_ctrl = [](int fd, uint32_t cid, int32_t val, const char *name) {
+            struct v4l2_ext_control c = {};
+            c.id = cid;
+            c.value = val;
+            struct v4l2_ext_controls cs = {};
+            cs.ctrl_class = V4L2_CTRL_CLASS_USER;
+            cs.count = 1;
+            cs.controls = &c;
+            if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &cs) == 0) {
+                ESP_LOGI(TAG, "Sensor %s set: %ld", name, (long)val);
+            } else {
+                ESP_LOGW(TAG, "Sensor %s set failed (errno=%d)", name, errno);
+            }
+        };
+
+        // Query exposure range, set to max (~33ms @ 30fps).
+        struct v4l2_query_ext_ctrl qc = {};
+        qc.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+        if (ioctl(s_cam_fd, VIDIOC_QUERY_EXT_CTRL, &qc) == 0) {
+            ESP_LOGI(TAG, "Exposure range: %lld..%lld step %llu (unit=100us)",
+                     (long long)qc.minimum, (long long)qc.maximum, (unsigned long long)qc.step);
+            set_ext_ctrl(s_cam_fd, V4L2_CID_EXPOSURE_ABSOLUTE, (int32_t)qc.maximum, "exposure");
+        } else {
+            ESP_LOGW(TAG, "Exposure query failed (errno=%d), using fallback", errno);
+            set_ext_ctrl(s_cam_fd, V4L2_CID_EXPOSURE_ABSOLUTE, 320, "exposure");
+        }
+
+        // Query gain range, set to ~50% (mid of enumeration ≈ 16x for SC202CS).
+        struct v4l2_query_ext_ctrl qg = {};
+        qg.id = V4L2_CID_GAIN;
+        int32_t gain_idx = 128;
+        if (ioctl(s_cam_fd, VIDIOC_QUERY_EXT_CTRL, &qg) == 0) {
+            gain_idx = (int32_t)(qg.minimum + (qg.maximum - qg.minimum) / 2);
+            ESP_LOGI(TAG, "Gain range: %lld..%lld → idx=%ld",
+                     (long long)qg.minimum, (long long)qg.maximum, (long)gain_idx);
+        } else {
+            ESP_LOGW(TAG, "Gain query failed (errno=%d), using fallback idx=128", errno);
+        }
+        set_ext_ctrl(s_cam_fd, V4L2_CID_GAIN, gain_idx, "gain");
     }
 
     ESP_LOGI(TAG, "Camera + QR scanner initialized");
@@ -309,7 +343,7 @@ static void camera_preview_to_dsi(const uint8_t *cam_frame,
     srm.scale_y = 1.0f;
     srm.mirror_x = false;
     srm.mirror_y = false;
-    srm.rgb_swap = true;   // ST7123 panel expects R↔B swap
+    srm.rgb_swap = false;  // RGB565 from ISP is already in panel order
     srm.byte_swap = false;
     srm.alpha_update_mode = PPA_ALPHA_NO_CHANGE;
     srm.mode = PPA_TRANS_MODE_BLOCKING;
