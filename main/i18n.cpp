@@ -57,6 +57,8 @@ static const char *EN[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "Fetching info...",
     [STR_LOADING_JSON]      = "Loading JSON...",
     [STR_ASSETS]            = "Assets",
+    [STR_LOADING_SOUNDS]    = "Loading sounds...",
+    [STR_LOADING_COSTUMES]  = "Loading costumes...",
 
     [STR_QR_SCAN_WIFI_HEAD]    = "Show me your Wi-Fi QR!",
     [STR_QR_SCAN_PROJECT_HEAD] = "Show me a Game QR!",
@@ -115,6 +117,8 @@ static const char *JP[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "じょうほうを とりに行ってるよ...",
     [STR_LOADING_JSON]      = "データを よみこみ中...",
     [STR_ASSETS]            = "そざい",
+    [STR_LOADING_SOUNDS]    = "おとを よみこみ中...",
+    [STR_LOADING_COSTUMES]  = "えを よみこみ中...",
 
     [STR_QR_SCAN_WIFI_HEAD]    = "Wi-Fi の QR をかざしてね",
     [STR_QR_SCAN_PROJECT_HEAD] = "ゲームの QR をかざしてね",
@@ -173,6 +177,8 @@ static const char *KR[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "정보 가져오는 중...",
     [STR_LOADING_JSON]      = "JSON 로딩 중...",
     [STR_ASSETS]            = "에셋",
+    [STR_LOADING_SOUNDS]    = "사운드 로딩 중...",
+    [STR_LOADING_COSTUMES]  = "코스튬 로딩 중...",
 
     [STR_QR_SCAN_WIFI_HEAD]    = "WiFi QR을 보여줘!",
     [STR_QR_SCAN_PROJECT_HEAD] = "게임 QR을 보여줘!",
@@ -231,6 +237,8 @@ static const char *ZH_CN[STR_COUNT] = {
     [STR_FETCHING_INFO]     = "获取信息中...",
     [STR_LOADING_JSON]      = "加载 JSON 中...",
     [STR_ASSETS]            = "资源",
+    [STR_LOADING_SOUNDS]    = "加载声音中...",
+    [STR_LOADING_COSTUMES]  = "加载造型中...",
 
     [STR_QR_SCAN_WIFI_HEAD]    = "把 WiFi QR 给我看看！",
     [STR_QR_SCAN_PROJECT_HEAD] = "把游戏 QR 给我看看！",

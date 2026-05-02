@@ -120,14 +120,27 @@ static void fill_rounded_rect(uint16_t *fb, int x, int y, int w, int h,
     }
 }
 
-// Dim every pixel by halving each channel — cheap "modal backdrop" effect.
-static void dim_full_screen(uint16_t *fb)
+// 0 = "dim existing FB" backdrop (used when the modal overlays a live image
+// like the camera preview). Non-zero = paint the whole FB with this RGB565
+// before drawing the card. The unified loading flow flips this on so the
+// area outside the white card stays Scratch-blue across every progress
+// update instead of fading to black after the FBs are cleared.
+static uint16_t s_modal_bg = 0;
+
+void dsi_modal_set_bg(uint16_t rgb565)
 {
-    // Walk the framebuffer linearly; we don't care about coordinates here.
-    uint16_t *p = fb;
+    s_modal_bg = rgb565;
+}
+
+static void paint_backdrop(uint16_t *fb)
+{
     int n = DSI_LCD_W * DSI_LCD_H;
-    for (int i = 0; i < n; i++) {
-        p[i] = (p[i] >> 1) & 0x7BEF;
+    if (s_modal_bg) {
+        uint16_t c = s_modal_bg;
+        for (int i = 0; i < n; i++) fb[i] = c;
+    } else {
+        // Halve each channel — cheap dim used to darken whatever was on screen.
+        for (int i = 0; i < n; i++) fb[i] = (fb[i] >> 1) & 0x7BEF;
     }
 }
 
@@ -343,10 +356,11 @@ static void flush_fb(uint16_t *fb)
 
 void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char *detail)
 {
+    ESP_LOGW("BLUE_DBG", "dsi_modal_show title=%s", title ? title : "(null)");
     uint16_t *fb = get_fb(panel);
     if (!fb) return;
 
-    dim_full_screen(fb);
+    paint_backdrop(fb);
 
     // Card
     int card_w = 720;
@@ -363,8 +377,12 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
     // Blue header strip (top portion of the card)
     int hdr_h = 110;
     fill_rounded_rect(fb, card_x, card_y, card_w, hdr_h, 36, CLR_BLUE);
-    // Square off the bottom of the header so it meets the card body cleanly
-    fill_rect_land(fb, card_x + 4, card_y + hdr_h - 36, card_w - 8, 36, CLR_BLUE);
+    // Square off the bottom of the header so it meets the card body cleanly.
+    // Must span the full card width — earlier we inset 4 px on each side to
+    // soften the join, which left a 4 px white notch on each corner of the
+    // header's bottom row (the rounded-corner arc doesn't reach there) and
+    // made the title area look like a trapezoid pinched at the bottom.
+    fill_rect_land(fb, card_x, card_y + hdr_h - 36, card_w, 36, CLR_BLUE);
 
     // Title in the blue header
     if (title) {
@@ -397,10 +415,11 @@ void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char 
 void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
                         int current, int total)
 {
+    ESP_LOGW("BLUE_DBG", "dsi_modal_progress %d/%d", current, total);
     uint16_t *fb = get_fb(panel);
     if (!fb) return;
 
-    dim_full_screen(fb);
+    paint_backdrop(fb);
 
     int card_w = 760;
     int card_h = 320;
@@ -413,7 +432,7 @@ void dsi_modal_progress(esp_lcd_panel_handle_t panel, const char *title,
 
     int hdr_h = 110;
     fill_rounded_rect(fb, card_x, card_y, card_w, hdr_h, 36, CLR_BLUE);
-    fill_rect_land(fb, card_x + 4, card_y + hdr_h - 36, card_w - 8, 36, CLR_BLUE);
+    fill_rect_land(fb, card_x, card_y + hdr_h - 36, card_w, 36, CLR_BLUE);
 
     if (title) {
         TextEntry *te = render_text(title, 29);

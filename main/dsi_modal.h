@@ -1,6 +1,14 @@
 #pragma once
 #include "esp_lcd_panel_ops.h"
 
+// Set a solid backdrop color (RGB565) for subsequent dsi_modal_show /
+// dsi_modal_progress calls. Pass 0 to revert to the default "dim the
+// previous framebuffer" backdrop. Used by the unified loading flow to
+// keep the area outside the white card a consistent Scratch-blue across
+// every progress update instead of fading toward black after the
+// framebuffers are cleared.
+void dsi_modal_set_bg(uint16_t rgb565);
+
 // Show a modal overlay on DSI display with status text
 // Renders a centered white card with a blue title strip and optional detail line
 void dsi_modal_show(esp_lcd_panel_handle_t panel, const char *title, const char *detail);

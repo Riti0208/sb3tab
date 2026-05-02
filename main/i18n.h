@@ -59,6 +59,8 @@ enum StringId {
     STR_FETCHING_INFO,
     STR_LOADING_JSON,
     STR_ASSETS,
+    STR_LOADING_SOUNDS,
+    STR_LOADING_COSTUMES,
 
     STR_QR_SCAN_WIFI_HEAD,      // "Wi-Fi の QR をかざしてね"
     STR_QR_SCAN_PROJECT_HEAD,   // "ゲームの QR をかざしてね"

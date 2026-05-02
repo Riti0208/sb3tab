@@ -172,6 +172,46 @@ static void free_assets() {
     if (g_project_json) { delete g_project_json; g_project_json = nullptr; }
 }
 
+#if USE_DSI_DISPLAY
+// Unified DSI loading-modal helpers. Once LVGL is suspended (ui_suspend) and
+// both DPI framebuffers are cleared, every loading phase — Wi-Fi connect,
+// JSON download, asset download, sound/costume rasterize — pushes its status
+// through these so the user sees one continuous modal instead of LVGL
+// screens flashing into a black screen and back.
+static int64_t s_loading_last_us = 0;
+
+// Scratch blue — same shade the modal header uses, so the backdrop and the
+// header read as one continuous block of color with the white card sitting
+// in the middle.
+static const uint16_t LOADING_BG_BLUE =
+    (uint16_t)(((0x4C >> 3) << 11) | ((0x97 >> 2) << 5) | (0xFF >> 3));
+
+static void loading_begin() {
+    dsi_modal_set_bg(LOADING_BG_BLUE);
+}
+
+static void loading_end() {
+    dsi_modal_set_bg(0);
+}
+
+static void loading_show(const char *title, const char *detail) {
+    if (!dsi_panel) return;
+    dsi_modal_show(dsi_panel, title, detail);
+    s_loading_last_us = esp_timer_get_time();
+}
+
+static void loading_progress(const char *title, int current, int total) {
+    if (!dsi_panel) return;
+    int64_t now = esp_timer_get_time();
+    bool terminal = (current == 0) || (total > 0 && current >= total);
+    // Throttle to ~10 fps; each call writes ~1.8 MB into PSRAM and waits a
+    // vsync, so an unthrottled loop would dominate load time on big projects.
+    if (!terminal && (now - s_loading_last_us) < 100000) return;
+    dsi_modal_progress(dsi_panel, title, current, total);
+    s_loading_last_us = now;
+}
+#endif
+
 static bool handle_command(const char *line) {
     if (strncmp(line, "JSON:", 5) == 0) {
         size_t size = atoi(line + 5);
@@ -787,6 +827,12 @@ static bool load_and_run()
     // that quickly chew the largest contiguous block from ~7 MB down to ~1 MB
     // — too small to fit the BGM and the alloc fails. Loading sounds first
     // lets the largest sound claim a clean contiguous block before fragmentation.
+#if USE_DSI_DISPLAY
+    int total_sounds = 0;
+    for (auto &sprite : Scratch::sprites) total_sounds += (int)sprite->sounds.size();
+    int sound_idx = 0;
+    if (total_sounds > 0) loading_progress(tr(STR_LOADING_SOUNDS), 0, total_sounds);
+#endif
     for (auto &sprite : Scratch::sprites) {
         for (auto &sound : sprite->sounds) {
             if (sound.fullName.empty()) continue;
@@ -802,6 +848,10 @@ static bool load_and_run()
             // testing whether DPI underrun-without-detection is the cause
             // of blue-flash-during-load).
             vTaskDelay(1);
+#if USE_DSI_DISPLAY
+            sound_idx++;
+            loading_progress(tr(STR_LOADING_SOUNDS), sound_idx, total_sounds);
+#endif
         }
     }
 
@@ -824,6 +874,12 @@ static bool load_and_run()
     }
 
     // Phase 2: costumes
+#if USE_DSI_DISPLAY
+    int total_costumes = 0;
+    for (auto &sprite : Scratch::sprites) total_costumes += (int)sprite->costumes.size();
+    int costume_idx = 0;
+    if (total_costumes > 0) loading_progress(tr(STR_LOADING_COSTUMES), 0, total_costumes);
+#endif
     for (auto &sprite : Scratch::sprites) {
         for (auto &costume : sprite->costumes) {
             if (costume.fullName.empty()) continue;
@@ -847,10 +903,21 @@ static bool load_and_run()
             });
             // Yield CPU/PSRAM bandwidth between each costume rasterize.
             vTaskDelay(1);
+#if USE_DSI_DISPLAY
+            costume_idx++;
+            loading_progress(tr(STR_LOADING_COSTUMES), costume_idx, total_costumes);
+#endif
         }
     }
 
     usb_ll_write("INIT\n");
+#if USE_DSI_DISPLAY
+    // Loading is done. Tear down the blue backdrop + modal card so the brief
+    // gap between the last asset loaded and the runtime task's first frame
+    // shows plain black instead of a stale "loading" card on Scratch-blue.
+    loading_end();
+    dsi_clear_both_fbs(dsi_panel);
+#endif
     // Force scratch_core's "turbo" path so scripts step every runtime-loop
     // iteration. The actual tick rate is set by the loop throttle below using
     // Scratch::FPS (parser reads the project's framerate, defaults to 30).
@@ -903,7 +970,7 @@ static bool load_and_run()
 static bool qr_download_project(const char *project_id)
 {
     usb_ll_write("DL_START\n");
-    ui_download_update(tr(STR_FETCHING_INFO), 0, 0);
+    loading_show(tr(STR_FETCHING_INFO), project_id);
 
     // Step 1: Get project token from API
     char url[256];
@@ -937,7 +1004,7 @@ static bool qr_download_project(const char *project_id)
     }
 
     // Step 2: Download project.json
-    ui_download_update(tr(STR_LOADING_JSON), 0, 0);
+    loading_show(tr(STR_LOADING_JSON), project_id);
     snprintf(url, sizeof(url), "https://projects.scratch.mit.edu/%s%s%s",
              project_id, token.empty() ? "" : "?token=", token.c_str());
 
@@ -1055,7 +1122,7 @@ static bool qr_download_project(const char *project_id)
     }
 
     for (auto &name : asset_names) {
-        ui_download_update(tr(STR_ASSETS), downloaded, total_assets);
+        loading_progress(tr(STR_ASSETS), downloaded, total_assets);
 
         snprintf(url, sizeof(url),
                  "https://assets.scratch.mit.edu/internalapi/asset/%s/get/",
@@ -1323,49 +1390,65 @@ extern "C" void app_main(void)
 
         if (action == MenuAction::PLAY_FROM_SD) {
             const char *pid = ui_get_selected_project_id();
-            ui_show_status(tr(STR_LOADING), pid);
+
+            // Hand the screen to the unified DSI loading modal: suspend LVGL,
+            // wipe the FBs, and from here every status update goes through
+            // loading_show/loading_progress so the user sees one continuous
+            // card instead of LVGL flashing into a black screen and back.
+            ui_suspend();
+            dsi_clear_both_fbs(dsi_panel);
+            loading_begin();
+            loading_show(tr(STR_LOADING), pid);
 
             if (!load_game_from_sd(pid)) {
-                ui_show_status(tr(STR_LOAD_FAILED), nullptr);
+                loading_show(tr(STR_LOAD_FAILED), pid);
                 vTaskDelay(pdMS_TO_TICKS(2000));
+                loading_end();
                 ui_resume();
                 continue;
             }
         } else if (action == MenuAction::PLAY_FROM_QR) {
             const char *pid = ui_get_selected_project_id();
 
+            ui_suspend();
+            dsi_clear_both_fbs(dsi_panel);
+            loading_begin();
+
             // Ensure WiFi is connected before download
             if (!wifi_is_connected()) {
                 char ssid[64] = {}, pass[128] = {};
                 if (sd_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass))) {
-                    ui_show_wifi_connecting(ssid);
+                    loading_show(tr(STR_WIFI_CONNECTING), ssid);
                     if (!wifi_connect(ssid, pass, 10000)) {
-                        ui_show_wifi_result(false, ssid);
+                        loading_show(tr(STR_WIFI_FAILED), ssid);
                         vTaskDelay(pdMS_TO_TICKS(2000));
+                        loading_end();
                         ui_resume();
                         continue;
                     }
-                    ui_show_wifi_result(true, ssid);
                     time_sync_start();
-                    vTaskDelay(pdMS_TO_TICKS(500));
+                } else {
+                    loading_show(tr(STR_NO_WIFI), tr(STR_NO_WIFI_DETAIL));
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    loading_end();
+                    ui_resume();
+                    continue;
                 }
             }
 
-            ESP_LOGI(TAG, "DL: show_download_start");
-            ui_show_download_start(pid);
             ESP_LOGI(TAG, "DL: calling qr_download_project");
+            loading_show(tr(STR_DOWNLOADING), pid);
 
             if (!qr_download_project(pid)) {
-                ui_show_download_result(false);
+                loading_show(tr(STR_DL_FAILED), pid);
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 wifi_disconnect();
+                loading_end();
                 ui_resume();
                 continue;
             }
 
-            ESP_LOGI(TAG, "DL: download complete, showing result");
-            ui_show_download_result(true);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            ESP_LOGI(TAG, "DL: download complete");
 
             ESP_LOGI(TAG, "DL: wifi_disconnect");
             wifi_disconnect();
@@ -1377,20 +1460,20 @@ extern "C" void app_main(void)
             continue;
         }
 
-        // Suspend LVGL and run the game
-        ui_show_status(tr(STR_STARTING), nullptr);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        ui_suspend();
-
-        // Clear both DPI framebuffers (remove LVGL UI residue)
-        dsi_clear_both_fbs(dsi_panel);
-
+        // Modal stays on screen through load_and_run; the runtime task's
+        // first frame overwrites it once sprites are fully loaded.
         if (load_and_run()) {
+            // Runtime task is now drawing; the loading-modal solid backdrop
+            // is no longer on screen, so future modal calls (e.g. the in-game
+            // exit confirm overlay) should resume their default dim behavior.
+            loading_end();
             // Game loop: check for Start/Select overlays
             while (scratch_running) {
                 game_overlay_check();
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
+        } else {
+            loading_end();
         }
 
         // Wait for runtime task to fully exit (frees its 64KB stack)
