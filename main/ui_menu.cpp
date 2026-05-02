@@ -2245,6 +2245,32 @@ void ui_show_status(const char *title, const char *detail)
     xSemaphoreGive(s_lvgl_mutex);
 }
 
+void ui_show_splash()
+{
+    xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    lv_group_remove_all_objs(s_group);
+
+    s_scr_status = lv_obj_create(nullptr);
+    lv_obj_add_style(s_scr_status, &s_style_bg, 0);
+
+    lv_obj_t *logo = lv_image_create(s_scr_status);
+    lv_image_set_src(logo, &ui_logo);
+    lv_obj_align(logo, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_clear_flag(logo, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *spinner = lv_spinner_create(s_scr_status);
+    lv_spinner_set_anim_params(spinner, 1000, 270);
+    lv_obj_set_size(spinner, 40, 40);
+    lv_obj_align(spinner, LV_ALIGN_CENTER, 0, 110);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(SCRATCH_WHITE), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(spinner, lv_color_hex(0x88B5FF), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(spinner, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(spinner, 5, LV_PART_MAIN);
+
+    show_screen(s_scr_status);
+    xSemaphoreGive(s_lvgl_mutex);
+}
+
 bool ui_show_confirm(const char *title, const char *detail)
 {
     s_confirm_result = -1;

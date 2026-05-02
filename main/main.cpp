@@ -1299,6 +1299,11 @@ extern "C" void app_main(void)
     // Initialize LVGL menu system
     ui_init(dsi_panel);
 
+    // Boot splash: ScratchESP logo + spinner. Held briefly so it's visible
+    // even when WiFi auto-connect kicks in immediately.
+    ui_show_splash();
+    vTaskDelay(pdMS_TO_TICKS(1200));
+
     // Boot-time WiFi connection (try saved credentials)
     {
         wifi_init();

@@ -57,6 +57,10 @@ void ui_show_download_result(bool ok);
 // Show a simple status screen (e.g. "Loading...", "Starting!")
 void ui_show_status(const char *title, const char *detail);
 
+// Show ScratchESP boot splash (logo + spinner). Call right after ui_init()
+// — stays on screen until the next ui_show_* call replaces it.
+void ui_show_splash();
+
 // Show confirmation dialog. Blocks until A or B pressed.
 // Returns true if confirmed (A).
 bool ui_show_confirm(const char *title, const char *detail);
