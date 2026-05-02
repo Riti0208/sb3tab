@@ -175,6 +175,9 @@ static char s_selected_project_id[64] = {};
 // True when QR_WIFI was entered from the settings card; the QR flow returns
 // to settings instead of the main menu when this is set.
 static bool s_qr_wifi_from_settings = false;
+// Last focused main-menu tile index (0=Games, 1=NewGame, 2=Settings); restored
+// when returning to the main menu so focus doesn't snap back to "あそぶ".
+static int s_main_menu_focus_idx = 0;
 
 // Settings
 // Brightness/volume are stored as 10%-step counts (1..10 for brightness,
@@ -825,12 +828,14 @@ static void add_chrome_bars(lv_obj_t *scr, const char *hint_text)
 // ============================================================
 
 static void on_games_click(lv_event_t *e) {
+    s_main_menu_focus_idx = 0;
     build_game_list();
     show_screen(s_scr_games);
     s_state = MenuState::GAME_LIST;
 }
 
 static void on_new_game_click(lv_event_t *e) {
+    s_main_menu_focus_idx = 1;
     // If WiFi is connected, go straight to project QR scan
     // Otherwise, need WiFi setup first
     if (wifi_is_connected()) {
@@ -847,6 +852,7 @@ static void on_new_game_click(lv_event_t *e) {
 }
 
 static void on_settings_click(lv_event_t *e) {
+    s_main_menu_focus_idx = 2;
     build_settings();
     show_screen(s_scr_settings);
     s_state = MenuState::SETTINGS;
@@ -879,9 +885,14 @@ static void build_main_menu()
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(cont, 32, 0);
 
-    create_tile_btn(cont, &ui_icon_play,     tr(STR_MAIN_GAMES),    on_games_click);
-    create_tile_btn(cont, &ui_icon_new,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
-    create_tile_btn(cont, &ui_icon_settings, tr(STR_MAIN_SETTINGS), on_settings_click);
+    lv_obj_t *tiles[3];
+    tiles[0] = create_tile_btn(cont, &ui_icon_play,     tr(STR_MAIN_GAMES),    on_games_click);
+    tiles[1] = create_tile_btn(cont, &ui_icon_new,      tr(STR_MAIN_NEW_GAME), on_new_game_click);
+    tiles[2] = create_tile_btn(cont, &ui_icon_settings, tr(STR_MAIN_SETTINGS), on_settings_click);
+
+    int idx = s_main_menu_focus_idx;
+    if (idx < 0 || idx > 2) idx = 0;
+    lv_group_focus_obj(tiles[idx]);
 
     bool conn = InputDev::any_connected();
     char hint[128];
