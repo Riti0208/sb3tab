@@ -168,6 +168,7 @@ static void free_assets() {
     }
     g_assets.clear();
     g_assets_sd_project_id.clear();
+    g_project_title.clear();
     if (g_project_json) { delete g_project_json; g_project_json = nullptr; }
 }
 
@@ -684,6 +685,7 @@ static void scratch_runtime_task(void *param)
 
 static bool load_and_run()
 {
+    ESP_LOGW("BLUE_DBG", "===== load_and_run START =====");
     if (!g_project_json) {
         usb_ll_write("ERR:no json\n");
         return false;
@@ -696,10 +698,11 @@ static bool load_and_run()
 
     esp_task_wdt_deinit();
 
-    Scratch::sprites.clear();
-    Render::monitors.clear();
-    Render::monitorTexts.clear();
-    Render::listMonitors.clear();
+    // Belt-and-suspenders: the menu→game path already calls
+    // Scratch::cleanupScratchProject() before re-entering load_and_run, but
+    // we keep this call in case load_and_run is invoked from elsewhere
+    // (USB serial mode) without going through the menu cleanup flow.
+    Scratch::cleanupScratchProject();
     SoundPlayer::cleanupAudio();
 
     // Initialize headless renderer (creates WindowHeadless)
@@ -795,6 +798,10 @@ static bool load_and_run()
                 ESP_LOGW(TAG, "sound asset MISSING: '%s' (sprite='%s')",
                          sound.fullName.c_str(), sprite->name.c_str());
             }
+            // Yield CPU/PSRAM bandwidth between each sound decode (debug:
+            // testing whether DPI underrun-without-detection is the cause
+            // of blue-flash-during-load).
+            vTaskDelay(1);
         }
     }
 
@@ -838,6 +845,8 @@ static bool load_and_run()
                     costume.trimHeight = th;
                 }
             });
+            // Yield CPU/PSRAM bandwidth between each costume rasterize.
+            vTaskDelay(1);
         }
     }
 
@@ -1332,6 +1341,7 @@ extern "C" void app_main(void)
                         continue;
                     }
                     ui_show_wifi_result(true, ssid);
+                    time_sync_start();
                     vTaskDelay(pdMS_TO_TICKS(500));
                 }
             }
@@ -1391,6 +1401,21 @@ extern "C" void app_main(void)
         SoundPlayer::cleanupAudio();
         audio_mixer_set_suspended(false);  // ensure resume state for next game
 
+        // Tear down all scratch_core runtime state: deletes every Sprite*
+        // (otherwise sprites.clear() at next load_and_run leaks them along
+        // with their blocks/costumes/sounds/variables), drops costumeImages
+        // cache, broadcast/clone/backdrop queues, stageSprite, answer,
+        // customUsername, monitors, SpeechManager, TextObject cache,
+        // DownloadManager. Also calls Render::penClear() which routes
+        // through our pen callback to wipe the pen layer.
+        Scratch::cleanupScratchProject();
+
+        // Reset transient input state so the next game doesn't see keys
+        // "still pressed" from the one that just exited.
+        Input::keyHeldDuration.clear();
+        Input::inputBuffer.clear();
+        Input::codePressedBlockOpcodes.clear();
+
         // Free rasterized costume RGBAs (~10 MB for Ninja Demo). Otherwise
         // PSRAM stays fragmented and the next project's 4 MB BGM allocation
         // fails inside sd_asset_load_cb, falling back to a 10 s CDN download.
@@ -1398,20 +1423,9 @@ extern "C" void app_main(void)
 
         // Game ended — clean up and return to menu
         free_assets();
-
-        // Reconnect WiFi using the same full-screen flow as boot
-        {
-            char ssid[64] = {}, pass[128] = {};
-            if (sd_load_wifi(ssid, sizeof(ssid), pass, sizeof(pass))) {
-                ui_resume();  // re-enable LVGL flush so the connecting screen is visible
-                ui_show_wifi_connecting(ssid);
-                bool ok = wifi_connect(ssid, pass, 10000);
-                ui_show_wifi_result(ok, ssid);
-                if (ok) time_sync_start();
-                vTaskDelay(pdMS_TO_TICKS(ok ? 1000 : 2000));
-            }
-        }
-        // ui_resume() happens at top of next ui_menu_run() iteration anyway
+        // ui_resume() happens at top of next ui_menu_run() iteration.
+        // WiFi stays disconnected until the user picks a new QR project; the
+        // system clock keeps ticking from the boot-time SNTP sync.
     }
 
 #else
