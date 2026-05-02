@@ -25,4 +25,12 @@ bool spriteOnEdge(Sprite *sprite);
 bool pointInSpriteFast(Sprite *sprite, float x, float y);
 bool spriteInSpriteFast(Sprite *a, Sprite *b);
 bool spriteOnEdgeFast(Sprite *sprite);
+
+// Color-touching: any opaque pixel of `self` overlaps a pixel of color (tr,tg,tb)
+// from any other visible sprite or the stage backdrop.
+bool spriteTouchingColor(Sprite *self, uint8_t tr, uint8_t tg, uint8_t tb);
+// Color-on-self touches color: pixels of self matching (sr,sg,sb) overlap a
+// pixel of color (tr,tg,tb) from any other visible sprite/stage.
+bool colorTouchingColor(Sprite *self, uint8_t sr, uint8_t sg, uint8_t sb,
+                        uint8_t tr, uint8_t tg, uint8_t tb);
 } // namespace collision
