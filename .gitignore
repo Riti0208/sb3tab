@@ -1,5 +1,11 @@
 build/
 sdkconfig
 sdkconfig.old
+sdkconfig.bak.*
 .cache/
 managed_components/
+.DS_Store
+__pycache__/
+tools/project.sb3
+tools/project_qr.png
+tools/wifi_qr.png
