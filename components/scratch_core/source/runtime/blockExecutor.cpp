@@ -380,8 +380,10 @@ void BlockExecutor::runRepeatsWithoutRefresh(Sprite *sprite, std::string blockCh
 }
 
 BlockResult BlockExecutor::runCustomBlock(Sprite *sprite, Block &block, Block *callerBlock, bool *withoutScreenRefresh) {
-    for (auto &[id, data] : sprite->customBlocks) {
-        if (id == block.customBlockId) {
+    auto cbIt = sprite->customBlocks.find(block.customBlockId);
+    if (cbIt != sprite->customBlocks.end()) {
+        auto &data = cbIt->second;
+        do {
             // Set up argument values
             for (std::string arg : data.argumentIds) {
                 auto inputIt = block.parsedInputs->find(arg);
@@ -424,9 +426,7 @@ BlockResult BlockExecutor::runCustomBlock(Sprite *sprite, Block &block, Block *c
             executor.runBlock(*customBlockDefinition, sprite, &localWithoutRefresh, false);
 
             if (localWithoutRefresh && !sprite->toDelete) BlockExecutor::runRepeatsWithoutRefresh(sprite, customBlockDefinition->blockChainID);
-
-            break;
-        }
+        } while (false);
     }
 
     if (block.customBlockId == "\u200B\u200Blog\u200B\u200B %s") Log::log("[PROJECT] " + Scratch::getInputValue(block, "arg0", sprite).asString());
@@ -509,17 +509,15 @@ void BlockExecutor::runBroadcasts() {
 }
 
 void BlockExecutor::runBroadcast(std::string broadcastToRun) {
+    // Snapshot sprite list — restartScript/runBlock can mutate Scratch::sprites
+    // (clones spawned/deleted during the dispatch).
     std::vector<Sprite *> sprToRun = Scratch::sprites;
     for (auto *currentSprite : sprToRun) {
-        for (auto &block : currentSprite->blocks) {
-            if (block.opcode == "event_whenbroadcastreceived") {
-                std::string fieldValue = Scratch::getFieldValue(block, "BROADCAST_OPTION");
-                std::transform(fieldValue.begin(), fieldValue.end(), fieldValue.begin(), ::tolower);
-                if (fieldValue == broadcastToRun) {
-                    restartScript(currentSprite, block);
-                    executor.runBlock(block, currentSprite);
-                }
-            }
+        auto it = currentSprite->broadcastHatBlocks.find(broadcastToRun);
+        if (it == currentSprite->broadcastHatBlocks.end()) continue;
+        for (Block *blockPtr : it->second) {
+            restartScript(currentSprite, *blockPtr);
+            executor.runBlock(*blockPtr, currentSprite);
         }
     }
 }
@@ -535,12 +533,11 @@ void BlockExecutor::runBackdrops() {
 void BlockExecutor::runBackdrop(std::string backdropToRun) {
     std::vector<Sprite *> sprToRun = Scratch::sprites;
     for (auto *currentSprite : sprToRun) {
-        for (auto &block : currentSprite->blocks) {
-            if (block.opcode == "event_whenbackdropswitchesto" &&
-                Scratch::getFieldValue(block, "BACKDROP") == backdropToRun) {
-                restartScript(currentSprite, block);
-                executor.runBlock(block, currentSprite);
-            }
+        auto it = currentSprite->backdropHatBlocks.find(backdropToRun);
+        if (it == currentSprite->backdropHatBlocks.end()) continue;
+        for (Block *blockPtr : it->second) {
+            restartScript(currentSprite, *blockPtr);
+            executor.runBlock(*blockPtr, currentSprite);
         }
     }
 }

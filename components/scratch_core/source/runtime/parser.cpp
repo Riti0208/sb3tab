@@ -1,4 +1,5 @@
 #include "parser.hpp"
+#include <algorithm>
 #include <input.hpp>
 #include <limits>
 #include <math.hpp>
@@ -353,6 +354,13 @@ void Parser::loadSprites(const nlohmann::json &json) {
                 newSprite->keyHatBlocks.push_back(&block);
             } else if (block.opcode == "makeymakey_whenMakeyKeyPressed") {
                 newSprite->makeyKeyHatBlocks.push_back(&block);
+            } else if (block.opcode == "event_whenbroadcastreceived") {
+                std::string name = Scratch::getFieldValue(block, "BROADCAST_OPTION");
+                std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                newSprite->broadcastHatBlocks[name].push_back(&block);
+            } else if (block.opcode == "event_whenbackdropswitchesto") {
+                std::string name = Scratch::getFieldValue(block, "BACKDROP");
+                newSprite->backdropHatBlocks[name].push_back(&block);
             }
         }
 

@@ -99,46 +99,33 @@ Color Value::asColor() const {
 }
 
 Value Value::operator+(const Value &other) const {
-    Value a = *this;
-    Value b = other;
-
-    return Value(a.asDouble() + b.asDouble());
+    return Value(asDouble() + other.asDouble());
 }
 
 Value Value::operator-(const Value &other) const {
-    Value a = *this;
-    Value b = other;
-
-    return Value(a.asDouble() - b.asDouble());
+    return Value(asDouble() - other.asDouble());
 }
 
 Value Value::operator*(const Value &other) const {
-    Value a = *this;
-    Value b = other;
-
-    return Value(a.asDouble() * b.asDouble());
+    return Value(asDouble() * other.asDouble());
 }
 
 Value Value::operator/(const Value &other) const {
-    Value a = *this;
-    Value b = other;
-    if (!a.isNumeric()) a = Value(0);
-    if (!b.isNumeric()) b = Value(0);
-
-    return Value(a.asDouble() / b.asDouble());
+    const double a = isNumeric() ? asDouble() : 0.0;
+    const double b = other.isNumeric() ? other.asDouble() : 0.0;
+    return Value(a / b);
 }
 
 bool Value::operator==(const Value &other) const {
-    std::string string1 = asString();
-    std::string string2 = other.asString();
-
-    if (!std::all_of(string1.begin(), string1.end(), [](unsigned char c) { return (std::isspace(c) && c != '\t'); }) &&
-        !std::all_of(string2.begin(), string2.end(), [](unsigned char c) { return (std::isspace(c) && c != '\t'); })) {
-        if (isNumeric() && other.isNumeric() && !isNaN() && !other.isNaN()) {
-            return asDouble() == other.asDouble();
-        }
+    // Fast path: both numeric (most common in tight loops). Avoids two string
+    // allocations + a transform pass that operator== does ~10k times per frame
+    // in tick-driven projects (Grillin').
+    if (isNumeric() && other.isNumeric() && !isNaN() && !other.isNaN()) {
+        return asDouble() == other.asDouble();
     }
 
+    std::string string1 = asString();
+    std::string string2 = other.asString();
     std::transform(string1.begin(), string1.end(), string1.begin(), ::tolower);
     std::transform(string2.begin(), string2.end(), string2.begin(), ::tolower);
     return string1 == string2;

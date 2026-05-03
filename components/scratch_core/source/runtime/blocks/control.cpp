@@ -1,6 +1,7 @@
 #include "blockUtils.hpp"
 #include "runtime.hpp"
 #include "runtime/blockExecutor.hpp"
+#include <algorithm>
 #include <audio.hpp>
 #include <blockExecutor.hpp>
 #include <iostream>
@@ -92,17 +93,26 @@ SCRATCH_BLOCK(control, create_clone_of) {
     clonedSprite->toDelete = false;
     clonedSprite->renderInfo.forceUpdate = true;
 
-    // Regenerate blocksMap and key-hat indices
+    // Regenerate blocksMap and hat indices
     clonedSprite->blocksMap.clear();
     clonedSprite->blocksMap.reserve(clonedSprite->blocks.size());
     clonedSprite->keyHatBlocks.clear();
     clonedSprite->makeyKeyHatBlocks.clear();
+    clonedSprite->broadcastHatBlocks.clear();
+    clonedSprite->backdropHatBlocks.clear();
     for (auto &block : clonedSprite->blocks) {
         clonedSprite->blocksMap[block.id] = &block;
         if (block.opcode == "event_whenkeypressed") {
             clonedSprite->keyHatBlocks.push_back(&block);
         } else if (block.opcode == "makeymakey_whenMakeyKeyPressed") {
             clonedSprite->makeyKeyHatBlocks.push_back(&block);
+        } else if (block.opcode == "event_whenbroadcastreceived") {
+            std::string name = Scratch::getFieldValue(block, "BROADCAST_OPTION");
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            clonedSprite->broadcastHatBlocks[name].push_back(&block);
+        } else if (block.opcode == "event_whenbackdropswitchesto") {
+            std::string name = Scratch::getFieldValue(block, "BACKDROP");
+            clonedSprite->backdropHatBlocks[name].push_back(&block);
         }
     }
 

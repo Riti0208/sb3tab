@@ -80,11 +80,11 @@ struct Block {
     Block *nextBlock = nullptr;
     std::string parent;
     std::string blockChainID;
-    std::unique_ptr<std::map<std::string, ParsedInput>> parsedInputs;
+    std::unique_ptr<std::unordered_map<std::string, ParsedInput>> parsedInputs;
     // Read-only after parse, deep-copied on clone. unique_ptr is 8 bytes
     // (vs shared_ptr's 16) and the per-clone deep-copy is cheap because
     // most blocks have 0-3 fields.
-    std::unique_ptr<std::map<std::string, ParsedField>> parsedFields;
+    std::unique_ptr<std::unordered_map<std::string, ParsedField>> parsedFields;
     bool shadow;
     bool topLevel;
 
@@ -115,8 +115,8 @@ struct Block {
     }
 
     Block() {
-        parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
-        parsedInputs = std::make_unique<std::map<std::string, ParsedInput>>();
+        parsedFields = std::make_unique<std::unordered_map<std::string, ParsedField>>();
+        parsedInputs = std::make_unique<std::unordered_map<std::string, ParsedInput>>();
     }
 
     Block(const Block &other)
@@ -128,9 +128,9 @@ struct Block {
 #endif
           customBlockPtr(nullptr) {
         if (other.parsedFields) {
-            parsedFields = std::make_unique<std::map<std::string, ParsedField>>(*other.parsedFields);
+            parsedFields = std::make_unique<std::unordered_map<std::string, ParsedField>>(*other.parsedFields);
         } else {
-            parsedFields = std::make_unique<std::map<std::string, ParsedField>>();
+            parsedFields = std::make_unique<std::unordered_map<std::string, ParsedField>>();
         }
 
         if (other.opData) {
@@ -138,10 +138,10 @@ struct Block {
         }
 
         if (other.parsedInputs) {
-            parsedInputs = std::make_unique<std::map<std::string, ParsedInput>>(*other.parsedInputs);
+            parsedInputs = std::make_unique<std::unordered_map<std::string, ParsedInput>>(*other.parsedInputs);
             return;
         }
-        parsedInputs = std::make_unique<std::map<std::string, ParsedInput>>();
+        parsedInputs = std::make_unique<std::unordered_map<std::string, ParsedInput>>();
     }
 
     friend void swap(Block &first, Block &second) noexcept {
@@ -356,6 +356,11 @@ class Sprite {
     // blocks every frame in BlockExecutor::executeKeyHats).
     std::vector<Block *> keyHatBlocks;       // event_whenkeypressed
     std::vector<Block *> makeyKeyHatBlocks;  // makeymakey_whenMakeyKeyPressed
+    // Lowercased broadcast/backdrop name → matching event hat blocks. Built
+    // once at parse time; runBroadcast/runBackdrop dispatch via map lookup
+    // instead of scanning every block on every sprite per broadcast.
+    std::unordered_map<std::string, std::vector<Block *>> broadcastHatBlocks;
+    std::unordered_map<std::string, std::vector<Block *>> backdropHatBlocks;
 
     ~Sprite() {
         variables.clear();
@@ -371,5 +376,7 @@ class Sprite {
         collisionPoints.clear();
         keyHatBlocks.clear();
         makeyKeyHatBlocks.clear();
+        broadcastHatBlocks.clear();
+        backdropHatBlocks.clear();
     }
 };
