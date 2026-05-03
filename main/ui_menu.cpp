@@ -1962,17 +1962,10 @@ MenuAction ui_menu_run()
         }
 
         if (s_state == MenuState::QR_PROJECT) {
-            // Check WiFi (post-game reconnect runs synchronously in main, so this is rare)
-            if (!wifi_is_connected()) {
-                ui_show_status(tr(STR_NO_WIFI), tr(STR_NO_WIFI_DETAIL));
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                s_state = MenuState::MAIN_MENU;
-                xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
-                build_main_menu();
-                show_screen(s_scr_main);
-                xSemaphoreGive(s_lvgl_mutex);
-                continue;
-            }
+            // WiFi is established lazily: boot tries saved creds, and the
+            // PLAY_FROM_QR handler in app_main reconnects after the QR scan
+            // returns a project ID. The scan itself doesn't need WiFi, so
+            // don't gate the camera on connection state here.
 
             // Disable LVGL flush during camera (camera owns DPI FB)
             s_flush_disabled = true;
