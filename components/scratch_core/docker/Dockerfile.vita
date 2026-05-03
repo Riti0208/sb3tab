@@ -1,0 +1,13 @@
+FROM vitasdk/vitasdk:latest AS main_builder
+WORKDIR /app
+
+COPY . .
+
+# Temporary fix until this is merged upstream
+RUN wget -O $VITASDK/share/vita.cmake "https://raw.githubusercontent.com/gradylink/vita-toolchain/refs/heads/fix/cmake/cmake_toolchain/vita.cmake"
+
+RUN cmake -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake -DCMAKE_BUILD_TYPE=Release -B build-vita && cmake --build build-vita -j 2
+
+FROM scratch AS exporter
+
+COPY --from=main_builder /app/build-vita/scratch-vita.vpk /

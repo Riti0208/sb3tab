@@ -1,0 +1,11 @@
+FROM emscripten/emsdk:latest AS main_builder
+
+WORKDIR /app
+
+COPY . .
+
+RUN mkdir build-wasm && cd build-wasm && emcmake cmake .. -DCMAKE_BUILD_TYPE=Release -DSE_OUTPUT_NAME=index && emmake make -j 2
+
+FROM scratch AS exporter
+
+COPY --from=main_builder /app/build-wasm/index.* /scratch-wasm/

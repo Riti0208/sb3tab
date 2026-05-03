@@ -1,0 +1,55 @@
+name: 3DS Nightly Build
+
+on:
+  push:
+    paths:
+      - CMakeLists.txt
+      - cmake/platforms/3ds.cmake
+      - cmake/renderers/citro2d.cmake
+      - cmake/windowing/3ds.cmake
+      - cmake/audio/sdl3.cmake
+      - source/platforms/
+      - source/platforms/3ds/**
+      - cmake/deps/*
+      - source/runtime/**
+      - source/renderers/citro2d/**
+      - source/*
+      - source/menus/**
+      - source/audio/sdl3/**
+      - gfx/3ds/**
+      - gfx/menu/**
+      - include/**
+      - .github/workflows/nightly-3ds.yml
+      - docker/Dockerfile.3ds
+      - source/main.cpp
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Export
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.3ds
+          target: exporter
+          outputs: type=local,dest=.
+
+      - name: Upload Artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scratch Everywhere! 3DS Nightly
+          path: |
+            scratch-3ds.3dsx
+            scratch-3ds.cia

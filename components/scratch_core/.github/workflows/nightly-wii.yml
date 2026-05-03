@@ -1,0 +1,51 @@
+name: Wii Nightly Build
+
+on:
+  push:
+    paths:
+      - CMakeLists.txt
+      - cmake/platforms/wii.cmake
+      - cmake/renderers/sdl2.cmake
+      - cmake/windowing/sdl2.cmake
+      - cmake/audio/sdl2.cmake
+      - cmake/deps/*
+      - source/runtime/**
+      - source/renderers/sdl2/**
+      - source/*
+      - source/menus/**
+      - source/platforms/
+      - source/platforms/wii/**
+      - source/audio/sdl2/**
+      - gfx/wii/**
+      - gfx/menu/**
+      - include/**
+      - .github/workflows/nightly-wii.yml
+      - docker/Dockerfile.wii
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Create `romfs` directory
+        run: mkdir romfs
+      - name: Build and Export
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.wii
+          target: exporter
+          outputs: type=local,dest=.
+      - name: Upload Artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scratch Everywhere! Wii Nightly
+          path: scratch-wii.zip
