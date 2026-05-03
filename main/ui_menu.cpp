@@ -686,10 +686,11 @@ static lv_obj_t *create_settings_card(lv_obj_t *parent, const char *label_text)
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(content, 16, 0);
-    // Inset children by 10px horizontally so the slider/dropdown's focused
-    // orange outline (pad 6 + width 4 = 10px outside the bounding box) fits
-    // within content's clip rect — otherwise the left side gets clipped.
-    lv_obj_set_style_pad_hor(content, 10, 0);
+    // Inset children by 28px horizontally. The slider knob (radius 24px =
+    // track_h/2 + pad_all) extends past the slider's bbox at min/max value;
+    // 10px would only clear the focused outline (pad 6 + width 4) but cuts
+    // off the knob. 28px = knob radius 24 + 4px breathing room.
+    lv_obj_set_style_pad_hor(content, 28, 0);
     return content;
 }
 
