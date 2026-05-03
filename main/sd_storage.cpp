@@ -18,6 +18,7 @@ static const char *WIFI_FILE = "/sd/wifi.txt";
 static const char *LANG_FILE = "/sd/lang.txt";
 static const char *BRIGHTNESS_FILE = "/sd/brightness.txt";
 static const char *VOLUME_FILE = "/sd/volume.txt";
+static const char *AUTORUN_FILE = "/sd/autorun.txt";
 static bool s_mounted = false;
 
 bool sd_init()
@@ -166,6 +167,48 @@ void sd_save_brightness(int pct) { save_int_file(BRIGHTNESS_FILE, pct, "Brightne
 bool sd_load_brightness(int *pct) { return load_int_file(BRIGHTNESS_FILE, pct); }
 void sd_save_volume(int level)   { save_int_file(VOLUME_FILE, level, "Volume"); }
 bool sd_load_volume(int *level)  { return load_int_file(VOLUME_FILE, level); }
+
+void sd_save_autorun(const char *project_id)
+{
+    if (!s_mounted || !project_id || !*project_id) return;
+    FILE *f = fopen(AUTORUN_FILE, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", AUTORUN_FILE);
+        return;
+    }
+    fprintf(f, "%s\n", project_id);
+    fclose(f);
+    ESP_LOGI(TAG, "Autorun project set: %s", project_id);
+}
+
+bool sd_load_autorun(char *out_pid, int out_size)
+{
+    if (!s_mounted || !out_pid || out_size < 1) return false;
+    FILE *f = fopen(AUTORUN_FILE, "r");
+    if (!f) return false;
+    out_pid[0] = '\0';
+    if (fgets(out_pid, out_size, f)) {
+        char *nl = strchr(out_pid, '\n');
+        if (nl) *nl = '\0';
+        // Trim trailing whitespace (CR, spaces) too — autorun.txt is hand-edited.
+        int n = (int)strlen(out_pid);
+        while (n > 0 && (out_pid[n-1] == '\r' || out_pid[n-1] == ' ' || out_pid[n-1] == '\t')) {
+            out_pid[--n] = '\0';
+        }
+    }
+    fclose(f);
+    if (out_pid[0] == '\0') return false;
+    ESP_LOGI(TAG, "Autorun project loaded: %s", out_pid);
+    return true;
+}
+
+void sd_clear_autorun()
+{
+    if (!s_mounted) return;
+    if (unlink(AUTORUN_FILE) == 0) {
+        ESP_LOGI(TAG, "Autorun cleared");
+    }
+}
 
 // ============================================================
 // Game storage

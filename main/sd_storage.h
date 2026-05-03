@@ -28,6 +28,14 @@ bool sd_load_brightness(int *pct);
 void sd_save_volume(int level);
 bool sd_load_volume(int *level);
 
+// Save/load autorun project ID. When `/sd/autorun.txt` exists, the boot
+// flow skips the menu and launches that project; relaunches it on game
+// exit so the same project loops across runs (useful for log-iteration).
+// out_pid must be at least SD_GAME_ID_LEN bytes. Returns true if loaded.
+void sd_save_autorun(const char *project_id);
+bool sd_load_autorun(char *out_pid, int out_size);
+void sd_clear_autorun();
+
 // ============================================================
 // Game storage: /sd/games/<project_id>/
 // ============================================================

@@ -220,37 +220,113 @@ void SWRenderer::evictUntilUnderBudget() {
     }
 }
 
+// Per-costume raster cap. Each rasterised costume holds w*h*4 bytes resident
+// when it's the active draw target. With MP3 BGM streamed instead of fully
+// decoded the LRU budget is typically 8 MB, so a 512 KB cap (~360×360 RGBA)
+// fits ~16 costumes simultaneously and is large enough that downscaling is
+// invisible at the 384×288 stage resolution.
+static const size_t MAX_SVG_RASTER_BYTES = 512 * 1024;
+
 bool SWRenderer::decodeInto(CostumePixels &cp, const std::string &name,
                             const uint8_t *data, size_t len) {
     int w = 0, h = 0;
     uint8_t *pixels = nullptr;
     bool isSvg = (name.size() > 4 && name.substr(name.size() - 4) == ".svg");
 
+    auto logPsram = [&](const char *what, size_t want) {
+        if (cp.loggedFailure) return;
+        cp.loggedFailure = true;
+        size_t freeB = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        size_t largestB = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+        ESP_LOGE(TAG, "decode FAIL %s [%s]: want=%zu KB, psram free=%zu KB, largest=%zu KB, lru=%zu KB, budget=%zu KB",
+                 name.c_str(), what, want / 1024,
+                 freeB / 1024, largestB / 1024,
+                 totalRgbaBytes / 1024, costumeBudgetBytes / 1024);
+    };
+
+    float decodeScale = 1.0f;
+
     if (isSvg) {
         char *svgCopy = (char *)heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM);
-        if (!svgCopy) return false;
+        if (!svgCopy) { logPsram("svgCopy", len + 1); return false; }
         memcpy(svgCopy, data, len);
         svgCopy[len] = '\0';
 
         NSVGimage *svg = nsvgParse(svgCopy, "px", 96.0f);
         heap_caps_free(svgCopy);
-        if (!svg) { ESP_LOGE(TAG, "SVG parse failed: %s", name.c_str()); return false; }
-        w = (int)svg->width;
-        h = (int)svg->height;
-        if (w <= 0 || h <= 0) { nsvgDelete(svg); return false; }
+        if (!svg) {
+            if (!cp.loggedFailure) {
+                cp.loggedFailure = true;
+                ESP_LOGE(TAG, "SVG parse failed: %s (len=%zu)", name.c_str(), len);
+            }
+            cp.decodeFailed = true;  // permanent: bytes don't parse as SVG
+            return false;
+        }
+        int orig_w = (int)svg->width;
+        int orig_h = (int)svg->height;
+        if (orig_w <= 0 || orig_h <= 0) {
+            if (!cp.loggedFailure) {
+                cp.loggedFailure = true;
+                ESP_LOGE(TAG, "SVG bad dims %s: w=%d h=%d", name.c_str(), orig_w, orig_h);
+            }
+            nsvgDelete(svg);
+            cp.decodeFailed = true;  // permanent: empty SVG, nothing to render
+            return false;
+        }
 
-        pixels = (uint8_t *)heap_caps_malloc((size_t)w * h * 4, MALLOC_CAP_SPIRAM);
-        if (!pixels) { nsvgDelete(svg); return false; }
+        // Cap raster output size. If full-resolution rasterisation would
+        // exceed MAX_SVG_RASTER_BYTES, scale uniformly so the output fits.
+        size_t origBytes = (size_t)orig_w * orig_h * 4;
+        if (origBytes > MAX_SVG_RASTER_BYTES) {
+            decodeScale = sqrtf((float)MAX_SVG_RASTER_BYTES / (float)origBytes);
+            w = std::max(1, (int)(orig_w * decodeScale));
+            h = std::max(1, (int)(orig_h * decodeScale));
+        } else {
+            w = orig_w;
+            h = orig_h;
+        }
+
+        size_t pxBytes = (size_t)w * h * 4;
+        pixels = (uint8_t *)heap_caps_malloc(pxBytes, MALLOC_CAP_SPIRAM);
+        if (!pixels) {
+            if (!cp.loggedFailure) {
+                ESP_LOGE(TAG, "  (SVG raster %dx%d, scale=%.2f, orig=%dx%d)",
+                         w, h, decodeScale, orig_w, orig_h);
+            }
+            logPsram("svg-pixels", pxBytes);
+            nsvgDelete(svg);
+            return false;
+        }
 
         NSVGrasterizer *rast = nsvgCreateRasterizer();
-        nsvgRasterize(rast, svg, 0, 0, 1.0f, pixels, w, h, w * 4);
+        nsvgRasterize(rast, svg, 0, 0, decodeScale, pixels, w, h, w * 4);
         nsvgDeleteRasterizer(rast);
         nsvgDelete(svg);
     } else {
         int channels;
         pixels = stbi_load_from_memory(data, len, &w, &h, &channels, 4);
-        if (!pixels) { ESP_LOGE(TAG, "PNG decode failed: %s", name.c_str()); return false; }
+        if (!pixels) {
+            // stb_image's failure can be either malloc-NULL or actual decode
+            // error — log PSRAM stats so we can tell which. Guard against
+            // stbi_failure_reason() returning NULL (newlib vfprintf crashes
+            // on NULL %s instead of printing "(null)").
+            const char *reason = stbi_failure_reason();
+            if (!cp.loggedFailure) {
+                cp.loggedFailure = true;
+                ESP_LOGE(TAG, "PNG decode failed: %s (encoded len=%zu, stbi=%s)",
+                         name.c_str(), len, reason ? reason : "(none)");
+            }
+            logPsram("png-decode", len);
+            // Permanent fail only for real decode errors; leave OOM as
+            // transient so the costume can decode again once PSRAM frees up.
+            if (!reason || strcmp(reason, "outofmem") != 0) {
+                cp.decodeFailed = true;
+            }
+            return false;
+        }
     }
+    cp.loggedFailure = false;
+    cp.decodeScale = decodeScale;
 
     cp.rgba = pixels;
     cp.w = w;
@@ -298,12 +374,27 @@ bool SWRenderer::ensureDecoded(const std::string &name, CostumePixels &cp) {
         if (lock) xSemaphoreGive(lock);
         return true;
     }
+    // Permanent fail cache: a costume that already failed once won't suddenly
+    // start fitting; skip the retry loop that was thrashing PSRAM at runtime.
+    if (cp.decodeFailed) {
+        if (lock) xSemaphoreGive(lock);
+        return false;
+    }
     if (!assetReader) {
+        if (!cp.loggedFailure) {
+            cp.loggedFailure = true;
+            ESP_LOGE(TAG, "ensureDecoded: no asset reader installed (%s)", name.c_str());
+        }
         if (lock) xSemaphoreGive(lock);
         return false;
     }
     auto bytes = assetReader(name);
     if (bytes.empty()) {
+        if (!cp.loggedFailure) {
+            cp.loggedFailure = true;
+            ESP_LOGE(TAG, "ensureDecoded: asset reader returned 0 bytes for %s", name.c_str());
+        }
+        cp.decodeFailed = true;
         if (lock) xSemaphoreGive(lock);
         return false;
     }
@@ -311,6 +402,12 @@ bool SWRenderer::ensureDecoded(const std::string &name, CostumePixels &cp) {
     if (ok) {
         touchLru(name);
         evictUntilUnderBudget();
+    } else {
+        // Mark permanent so the runtime stops re-attempting every frame.
+        // Even pure-OOM failures here, once the LRU and sounds have
+        // already claimed the PSRAM, won't recover without a reboot —
+        // retrying just burns CPU and fragments the heap further.
+        cp.decodeFailed = true;
     }
     if (lock) xSemaphoreGive(lock);
     return ok;
@@ -418,24 +515,40 @@ bool SWRenderer::loadCostume(const std::string &md5ext, double rotCenterX, doubl
 }
 
 bool SWRenderer::loadCostumeFromMemory(const std::string &name, const uint8_t *data, size_t len,
-                                        double rotCenterX, double rotCenterY) {
+                                        double rotCenterX, double rotCenterY,
+                                        int bitmapResolution) {
     SemaphoreHandle_t lock = (SemaphoreHandle_t)costumeLock;
     if (lock) xSemaphoreTake(lock, portMAX_DELAY);
 
+    if (bitmapResolution < 1) bitmapResolution = 1;
+
+    // Convert the caller-supplied rotation center to raster coords. PNG
+    // input is pre-divided by parser when bitmapResolution==2 (so it's in
+    // logical pixels), while SVG input is in raw bitmap pixels regardless;
+    // the multiplier compensates so cp.rotCenter ends up in the same space
+    // as cp.w / cp.h.
+    bool isSvg = (name.size() > 4 && name.substr(name.size() - 4) == ".svg");
+
     auto &cp = costumes[name];
-    cp.rotCenterX = rotCenterX;
-    cp.rotCenterY = rotCenterY;
+    cp.bitmapResolution = bitmapResolution;
     if (cp.rgba) {
-        // Already decoded earlier (likely from another sprite sharing the
-        // costume); just refresh LRU position.
+        float rasterMul = cp.decodeScale * (isSvg ? 1.0f : (float)bitmapResolution);
+        cp.rotCenterX = rotCenterX * rasterMul;
+        cp.rotCenterY = rotCenterY * rasterMul;
         touchLru(name);
         if (lock) xSemaphoreGive(lock);
         return true;
     }
     if (!decodeInto(cp, name, data, len)) {
+        cp.decodeFailed = true;
         if (lock) xSemaphoreGive(lock);
         return false;
     }
+    // decodeScale is now set by decodeInto; combine with bitmapResolution
+    // to project the rotation center into raster coords.
+    float rasterMul = cp.decodeScale * (isSvg ? 1.0f : (float)bitmapResolution);
+    cp.rotCenterX = rotCenterX * rasterMul;
+    cp.rotCenterY = rotCenterY * rasterMul;
     touchLru(name);
     evictUntilUnderBudget();
     if (lock) xSemaphoreGive(lock);
@@ -445,10 +558,17 @@ bool SWRenderer::loadCostumeFromMemory(const std::string &name, const uint8_t *d
 bool SWRenderer::getCostumeTrimBounds(const std::string &name, int &trimX, int &trimY, int &trimW, int &trimH) const {
     auto it = costumes.find(name);
     if (it == costumes.end()) return false;
-    trimX = it->second.trimX;
-    trimY = it->second.trimY;
-    trimW = it->second.trimW;
-    trimH = it->second.trimH;
+    // trim* are stored in raster coords; callers (collision, AABB sizing)
+    // expect logical coords. Undo both the decode-time downscale AND the
+    // costume's bitmapResolution (a value of 2 means 2 raster pixels per
+    // logical pixel even before our own scaling kicked in).
+    int bmRes = it->second.bitmapResolution > 0 ? it->second.bitmapResolution : 1;
+    float invScale = (it->second.decodeScale > 0.0f) ? 1.0f / it->second.decodeScale : 1.0f;
+    invScale /= (float)bmRes;
+    trimX = (int)(it->second.trimX * invScale);
+    trimY = (int)(it->second.trimY * invScale);
+    trimW = (int)(it->second.trimW * invScale);
+    trimH = (int)(it->second.trimH * invScale);
     return true;
 }
 
@@ -479,10 +599,17 @@ void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
     if (alpha <= 0.0f) return;
     float scale = size / 100.0f;
 
+    // The raster bitmap may be downscaled (decodeScale<1) and/or have
+    // bitmapResolution=2 (raster=2× logical); divide both out so each
+    // logical pixel still occupies the same screen area as the un-scaled
+    // costume would.
+    int bmRes = it->second.bitmapResolution > 0 ? it->second.bitmapResolution : 1;
+    float effectiveScale = (scale * LOGICAL_TO_FB) /
+                           (it->second.decodeScale * (float)bmRes);
     blitRGBA(it->second,
              (int)(STAGE_W / 2.0f + x * LOGICAL_TO_FB),
              (int)(STAGE_H / 2.0f - y * LOGICAL_TO_FB),
-             scale * LOGICAL_TO_FB, direction - 90.0f, alpha, brightnessEffect, flipH);
+             effectiveScale, direction - 90.0f, alpha, brightnessEffect, flipH);
 }
 
 void SWRenderer::drawBackdrop(const std::string &costumeMd5ext) {
@@ -686,7 +813,11 @@ void SWRenderer::penStampSprite(const std::string &costumeMd5ext, float x, float
 
     float rad = (direction - 90.0f) * M_PI / 180.0f;
     float cosA = cosf(rad), sinA = sinf(rad);
-    scale *= LOGICAL_TO_FB;
+    // Match drawSprite: compensate for raster downscaling AND
+    // bitmapResolution so each logical pixel still occupies the same area
+    // on the pen layer.
+    int bmRes = cos.bitmapResolution > 0 ? cos.bitmapResolution : 1;
+    scale = (scale * LOGICAL_TO_FB) / (cos.decodeScale * (float)bmRes);
     int cx = (int)(STAGE_W / 2.0f + x * LOGICAL_TO_FB);
     int cy = (int)(STAGE_H / 2.0f - y * LOGICAL_TO_FB);
 
@@ -877,8 +1008,13 @@ void SWRenderer::blitRGBA(const CostumePixels &cos, int cx, int cy,
 bool SWRenderer::getCostumeSize(const std::string &name, int &w, int &h) const {
     auto it = costumes.find(name);
     if (it == costumes.end()) return false;
-    w = it->second.w;
-    h = it->second.h;
+    // cp.w/h are raster coords; callers want logical (Scratch-pixel) coords.
+    // Undo both the decode-time downscale AND bitmapResolution.
+    int bmRes = it->second.bitmapResolution > 0 ? it->second.bitmapResolution : 1;
+    float invScale = (it->second.decodeScale > 0.0f) ? 1.0f / it->second.decodeScale : 1.0f;
+    invScale /= (float)bmRes;
+    w = (int)(it->second.w * invScale);
+    h = (int)(it->second.h * invScale);
     return true;
 }
 

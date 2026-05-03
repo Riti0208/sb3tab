@@ -922,7 +922,8 @@ static bool load_and_run()
                 renderer->loadCostumeFromMemory(costume.fullName,
                                                  data, len,
                                                  costume.rotationCenterX,
-                                                 costume.rotationCenterY);
+                                                 costume.rotationCenterY,
+                                                 costume.bitmapResolution);
                 int cw, ch;
                 if (renderer->getCostumeSize(costume.fullName, cw, ch)) {
                     sprite->spriteWidth = cw;
@@ -1430,12 +1431,68 @@ extern "C" void app_main(void)
         }
     }
 
+    // Dump saved-games list at boot so the serial log carries enough info
+    // to identify project IDs (the menu UI shows names but the autorun
+    // mechanism keys on IDs).
+    {
+        SdGameList glist;
+        sd_list_games(&glist);
+        for (int i = 0; i < glist.count; i++) {
+            ESP_LOGW(TAG, "SD GAME [%d] id=%s name=%s",
+                     i, glist.entries[i].project_id, glist.entries[i].name);
+        }
+    }
+
+    // Autorun bootstrap: if no autorun.txt exists yet, look for a saved game
+    // whose name contains "Grillin" and write its ID. One-shot convenience
+    // for the current debug cycle so the user doesn't need to pull the SD
+    // card out to seed the file. Remove this block once the diagnostic
+    // session for that project is done.
+    {
+        char existing[32] = {};
+        if (!sd_load_autorun(existing, sizeof(existing))) {
+            SdGameList glist;
+            sd_list_games(&glist);
+            for (int i = 0; i < glist.count; i++) {
+                if (strstr(glist.entries[i].name, "Grillin") ||
+                    strstr(glist.entries[i].name, "grillin") ||
+                    strstr(glist.entries[i].name, "GRILLIN")) {
+                    ESP_LOGW(TAG, "AUTORUN BOOTSTRAP: matched '%s' (id=%s)",
+                             glist.entries[i].name, glist.entries[i].project_id);
+                    sd_save_autorun(glist.entries[i].project_id);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Autorun: if /sd/autorun.txt holds a saved project ID, skip the menu and
+    // launch that project. After it exits, the main loop comes back here and
+    // relaunches the same project — useful for log-iteration ("flash + reboot
+    // + reproduce" cycles). To break the loop, delete /sd/autorun.txt and
+    // power-cycle. Load failure disarms autorun for this session so a
+    // misconfigured file can't trap us in a fail-pause-retry loop.
+    char autorun_pid[32] = {};
+    bool autorun_armed = sd_load_autorun(autorun_pid, sizeof(autorun_pid));
+    if (autorun_armed) {
+        ESP_LOGW(TAG, "===== AUTORUN ARMED: project=%s =====", autorun_pid);
+    }
+
     // Main loop: menu → game → menu → ...
     while (true) {
-        MenuAction action = ui_menu_run();
+        MenuAction action;
+        const char *autorun_pid_ptr = nullptr;
+        if (autorun_armed) {
+            ESP_LOGI(TAG, "AUTORUN: launching %s", autorun_pid);
+            action = MenuAction::PLAY_FROM_SD;
+            autorun_pid_ptr = autorun_pid;
+        } else {
+            action = ui_menu_run();
+        }
 
         if (action == MenuAction::PLAY_FROM_SD) {
-            const char *pid = ui_get_selected_project_id();
+            const char *pid = autorun_pid_ptr ? autorun_pid_ptr
+                                              : ui_get_selected_project_id();
 
             // WiFi SDIO RX path keeps allocating PSRAM buffers; once the
             // game starts and PSRAM fills up with sounds/costumes the SDIO
@@ -1461,6 +1518,12 @@ extern "C" void app_main(void)
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 loading_end();
                 ui_resume();
+                if (autorun_armed) {
+                    // Disarm so we fall back to the menu instead of looping
+                    // on a missing/broken autorun project for this session.
+                    ESP_LOGW(TAG, "AUTORUN: load failed, disarming for this session");
+                    autorun_armed = false;
+                }
                 continue;
             }
         } else if (action == MenuAction::PLAY_FROM_QR) {

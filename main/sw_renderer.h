@@ -18,12 +18,17 @@
 
 struct CostumePixels {
     uint8_t *rgba = nullptr;  // RGBA8888 — may be nullptr when evicted from LRU.
+    // Raster dimensions: the size of `rgba` in actual pixels. SVGs whose full
+    // rasterisation would exceed MAX_SVG_RASTER_BYTES are downscaled at decode
+    // time to fit the LRU budget; for those, `decodeScale` < 1.0 records the
+    // scale factor so blit can compensate (each raster pixel represents
+    // 1/decodeScale logical pixels of visual size).
     int w = 0;
     int h = 0;
-    double rotCenterX = 0;
+    double rotCenterX = 0;  // already multiplied by decodeScale (raster coords)
     double rotCenterY = 0;
-    // Trimmed (visible) bounds in costume pixel coords. Used for AABB collision
-    // so transparent SVG padding doesn't inflate the hitbox.
+    // Trimmed (visible) bounds in raster pixel coords (so they line up with
+    // rgba for collision); convert back to logical via decodeScale on read.
     int trimX = 0, trimY = 0, trimW = 0, trimH = 0;
     // Per-row visibility: 1 if that costume row has any non-transparent pixel,
     // 0 if fully empty. Lets the blit loop skip whole-row no-ops, big win for
@@ -31,6 +36,23 @@ struct CostumePixels {
     uint8_t *rowSet = nullptr;
     // True once dimensions/trim/rowSet have been computed at least once.
     bool metaReady = false;
+    // Suppresses repeat decode-failure logs for this costume so a missing
+    // sprite that's drawn every frame doesn't flood the console. Cleared on
+    // a successful decode, so a later transient failure logs again.
+    bool loggedFailure = false;
+    // Once a decode definitively fails (parse error, alloc-NULL even after
+    // size cap), skip further attempts. Stops the runtime from re-decoding
+    // the same broken costume every frame and burning PSRAM bandwidth.
+    bool decodeFailed = false;
+    // raster_size / logical_size, ≤1.0. SVGs are downscaled on decode if a
+    // full-resolution rasterisation would exceed MAX_SVG_RASTER_BYTES. PNG
+    // costumes are always 1.0 (we have to use whatever size the file is).
+    float decodeScale = 1.0f;
+    // Scratch's "bitmap resolution" attribute (1 or 2). Resolution=2 means
+    // the bitmap is 2× the logical size — a high-DPI/Retina costume that
+    // should display at half its raw pixel dimensions. Used to scale the
+    // visual output and the values returned by getCostumeSize.
+    int bitmapResolution = 1;
 };
 
 class SWRenderer {
@@ -43,9 +65,12 @@ public:
     bool loadCostume(const std::string &md5ext, double rotCenterX, double rotCenterY,
                      const std::string &storeAs = "");
 
-    // Load costume from memory buffer (for .sb3 ZIP extraction)
+    // Load costume from memory buffer (for .sb3 ZIP extraction).
+    // bitmapResolution comes from the Scratch costume metadata (1 or 2);
+    // 2 indicates a high-DPI bitmap whose visual size is half its raw pixels.
     bool loadCostumeFromMemory(const std::string &name, const uint8_t *data, size_t len,
-                                double rotCenterX, double rotCenterY);
+                                double rotCenterX, double rotCenterY,
+                                int bitmapResolution = 1);
 
     // Clear framebuffer to white (full clear)
     void clear();
