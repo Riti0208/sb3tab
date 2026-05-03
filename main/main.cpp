@@ -44,6 +44,7 @@
 #include "input_device.h"
 #include "input_xbox.h"
 #include "input_gpio.h"
+#include "touch_input.h"
 #include "es8388_audio.h"
 #include "ui_menu.h"
 #include "i18n.h"
@@ -332,8 +333,22 @@ void collision_reset_counters();
 // Bridge: hardware InputDev state → Scratch core's named buttons.
 // The Scratch runtime looks up these names in Input::inputControls (populated
 // by auto_map_input() below) to know which key each button represents.
+//
+// Also injects touch panel state into Input::mousePointer so blocks like
+// mousex/mousey/mousedown, "touching mouse-pointer", and click hat events
+// (event_whenthisspriteclicked) work — that's the entire mouse/click surface
+// the Scratch runtime exposes.
 static void input_to_scratch_callback()
 {
+    // --- touch → Input::mousePointer ---
+    touch_stage_t t;
+    if (touch_input_get_stage(&t)) {
+        Input::mousePointer.x = t.stage_x;
+        Input::mousePointer.y = t.stage_y;
+        Input::mousePointer.isPressed = t.pressed;
+        Input::mousePointer.isMoving = t.pressed;
+    }
+
     InputDev::State s = InputDev::get();
     if (!s.any_connected) return;
 
@@ -544,7 +559,7 @@ static void render_helper_task(void *param) {
         xSemaphoreGive(s_spr_done);
     }
     xSemaphoreGive(s_helper_exited);
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(nullptr);  // task created with xTaskCreatePinnedToCoreWithCaps
 }
 
 // ============================================================
@@ -572,7 +587,13 @@ static void scratch_runtime_task(void *param)
     s_spr_done = xSemaphoreCreateBinary();
     s_helper_exited = xSemaphoreCreateBinary();
     s_helper_run = true;
-    xTaskCreatePinnedToCore(render_helper_task, "render_helper", 8192, nullptr, 5, nullptr, 0);
+    // PNG decoding (stbi__compute_huffman_codes) puts ~3 KB of huffman
+    // tables on the stack; the decoder runs on whichever core happens to
+    // request a not-yet-cached costume, so render_helper needs the same
+    // headroom as the scratch_rt task. Allocate the 32KB stack in PSRAM
+    // (internal RAM is too tight — boot leaves only ~120 KB largest free).
+    xTaskCreatePinnedToCoreWithCaps(render_helper_task, "render_helper", 32768,
+                                     nullptr, 5, nullptr, 0, MALLOC_CAP_SPIRAM);
 
     // Kick off first clear before entering loop
     s_helper_state.renderer = renderer;
@@ -589,7 +610,21 @@ static void scratch_runtime_task(void *param)
         xSemaphoreTake(sprite_mutex, portMAX_DELAY);
 
         int64_t t0 = esp_timer_get_time();
-        auto [running, restart] = Scratch::stepScratchProject();
+        // Wrap stepScratchProject in a catch — projects with lots of clones
+        // (e.g. Grillin: 11 control_create_clone_of blocks) can hit
+        // std::bad_alloc deep in Sprite::operator= when PSRAM is fragmented.
+        // Without this catch the exception propagates to terminate() and the
+        // whole device reboots. Skipping a single tick is far better than
+        // losing the whole game.
+        std::pair<bool, bool> step_result = {true, false};
+        try {
+            step_result = Scratch::stepScratchProject();
+        } catch (const std::bad_alloc &) {
+            ESP_LOGW(TAG, "step: bad_alloc (PSRAM fragmented, free=%u largest=%u) — skip frame",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        }
+        auto [running, restart] = step_result;
         int64_t t1 = esp_timer_get_time();
 
         if (renderer) {
@@ -1327,20 +1362,30 @@ extern "C" void app_main(void)
     // Looks up g_assets first (USB-fed projects keep raw bytes resident);
     // otherwise falls back to /sd/games/<id>/assets/<name>.
     renderer->setAssetReader([](const std::string &name) -> std::vector<uint8_t> {
-        for (auto &asset : g_assets) {
-            if (asset.name == name) {
-                return std::vector<uint8_t>(asset.data, asset.data + asset.len);
+        // The vector copy needs a contiguous PSRAM block the size of the
+        // asset (sometimes a few MB for big PNGs). When PSRAM is fragmented,
+        // the std::vector ctor throws bad_alloc; without a catch it
+        // propagates up to terminate(). Swallow the throw so the renderer
+        // just sees "decode failed" and the sprite stays as it was.
+        try {
+            for (auto &asset : g_assets) {
+                if (asset.name == name) {
+                    return std::vector<uint8_t>(asset.data, asset.data + asset.len);
+                }
             }
-        }
-        if (!g_assets_sd_project_id.empty()) {
-            size_t alen = 0;
-            uint8_t *adata = sd_read_asset(g_assets_sd_project_id.c_str(),
-                                            name.c_str(), &alen);
-            if (adata) {
-                std::vector<uint8_t> v(adata, adata + alen);
-                heap_caps_free(adata);
-                return v;
+            if (!g_assets_sd_project_id.empty()) {
+                size_t alen = 0;
+                uint8_t *adata = sd_read_asset(g_assets_sd_project_id.c_str(),
+                                                name.c_str(), &alen);
+                if (adata) {
+                    std::vector<uint8_t> v(adata, adata + alen);
+                    heap_caps_free(adata);
+                    return v;
+                }
             }
+        } catch (const std::bad_alloc &) {
+            ESP_LOGW(TAG, "asset reader: bad_alloc for %s (PSRAM fragmented)",
+                     name.c_str());
         }
         return {};
     });
@@ -1357,6 +1402,7 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(500));
     input_xbox_init();
     input_gpio_init();
+    touch_input_init();
     sd_init();
 
     // Load saved UI language (depends on SD being mounted; defaults to EN)
@@ -1390,6 +1436,16 @@ extern "C" void app_main(void)
 
         if (action == MenuAction::PLAY_FROM_SD) {
             const char *pid = ui_get_selected_project_id();
+
+            // WiFi SDIO RX path keeps allocating PSRAM buffers; once the
+            // game starts and PSRAM fills up with sounds/costumes the SDIO
+            // task asserts in copy_payload (sdio_drv.c:977). Disconnect now
+            // — the game runs offline. (QR path already disconnects after
+            // the download completes.)
+            if (wifi_is_connected()) {
+                ESP_LOGI(TAG, "PLAY_FROM_SD: wifi_disconnect");
+                wifi_disconnect();
+            }
 
             // Hand the screen to the unified DSI loading modal: suspend LVGL,
             // wipe the FBs, and from here every status update goes through

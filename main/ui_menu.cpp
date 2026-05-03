@@ -5,6 +5,7 @@
 #include "dsi_display.h"
 #include "dsi_modal.h"
 #include "input_device.h"
+#include "touch_input.h"
 #include "sd_storage.h"
 #include "wifi_manager.h"
 #include "camera_qr.h"
@@ -159,6 +160,7 @@ static const char *TAG = "ui_menu";
 static esp_lcd_panel_handle_t s_panel = nullptr;
 static lv_display_t *s_disp = nullptr;
 static lv_indev_t *s_indev = nullptr;
+static lv_indev_t *s_indev_touch = nullptr;
 static lv_group_t *s_group = nullptr;
 static TaskHandle_t s_lvgl_task = nullptr;
 static SemaphoreHandle_t s_lvgl_mutex = nullptr;
@@ -217,6 +219,9 @@ static bool lvgl_ppa_done_cb(ppa_client_handle_t client, ppa_event_data_t *event
 
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+    ESP_LOGW("BLUE_DBG", "lvgl_flush_cb disabled=%d area=(%d,%d)-(%d,%d)",
+             (int)s_flush_disabled, (int)area->x1, (int)area->y1,
+             (int)area->x2, (int)area->y2);
     // Skip flush when camera or game owns the DPI framebuffer
     if (s_flush_disabled) {
         lv_display_flush_ready(disp);
@@ -276,6 +281,35 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     dsi_present(s_panel);
 
     lv_display_flush_ready(disp);
+}
+
+// ============================================================
+// LVGL pointer read callback — touch panel mapped into landscape (1280x720),
+// the same orientation LVGL is rendering at.
+// ============================================================
+
+static void lvgl_pointer_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    touch_raw_t t;
+    if (!touch_input_get_raw(&t)) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    // Panel(720x1280 portrait) → landscape(1280x720). DPI panel is rotated
+    // 270° in dsi_display.cpp, so:
+    //   landscape_x = (PANEL_H - 1) - panel_y
+    //   landscape_y = panel_x
+    int lx = (1280 - 1) - t.y;
+    int ly = t.x;
+    if (lx < 0) lx = 0;
+    if (lx > 1279) lx = 1279;
+    if (ly < 0) ly = 0;
+    if (ly > 719) ly = 719;
+
+    data->point.x = lx;
+    data->point.y = ly;
+    data->state = t.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 // ============================================================
@@ -1779,6 +1813,13 @@ void ui_init(esp_lcd_panel_handle_t panel)
     lv_indev_set_type(s_indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(s_indev, lvgl_indev_read_cb);
 
+    // Touch pointer indev (ST7123 capacitive). Lives alongside the keypad
+    // indev so users can tap menu items directly OR navigate with the d-pad.
+    s_indev_touch = lv_indev_create();
+    lv_indev_set_type(s_indev_touch, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(s_indev_touch, lvgl_pointer_read_cb);
+    lv_indev_set_display(s_indev_touch, s_disp);
+
     // Default group for all focusable widgets
     s_group = lv_group_create();
     lv_group_set_default(s_group);
@@ -1873,6 +1914,17 @@ MenuAction ui_menu_run()
                     }
                     InputDev::State gs = InputDev::get();
                     if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) break;
+                    // Tap on the bottom hint strip (where the "press B to back"
+                    // text lives) acts as a back gesture too — touch users
+                    // otherwise have no way out of the QR scan loop.
+                    // Hint strip in landscape = bottom 88 px → panel_x > (720 - QR_STRIP_H).
+                    static bool s_qr_was_pressed_w = false;
+                    touch_raw_t tr_w;
+                    if (touch_input_get_raw(&tr_w)) {
+                        bool edge = tr_w.pressed && !s_qr_was_pressed_w;
+                        s_qr_was_pressed_w = tr_w.pressed;
+                        if (edge && tr_w.x > (720 - QR_STRIP_H)) break;
+                    }
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 camera_deinit();
@@ -1959,6 +2011,17 @@ MenuAction ui_menu_run()
                     if (gs.buttons & (InputDev::B | InputDev::BACK | InputDev::START)) {
                         ESP_LOGI(TAG, "QR: back button pressed");
                         break;
+                    }
+                    // Tap on the bottom hint strip = back (same as WiFi scan).
+                    static bool s_qr_was_pressed_p = false;
+                    touch_raw_t tr_p;
+                    if (touch_input_get_raw(&tr_p)) {
+                        bool edge = tr_p.pressed && !s_qr_was_pressed_p;
+                        s_qr_was_pressed_p = tr_p.pressed;
+                        if (edge && tr_p.x > (720 - QR_STRIP_H)) {
+                            ESP_LOGI(TAG, "QR: tap-back");
+                            break;
+                        }
                     }
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
@@ -2074,11 +2137,13 @@ const char *ui_get_selected_project_id()
 
 void ui_suspend()
 {
+    ESP_LOGW("BLUE_DBG", "===== ui_suspend (flush off) =====");
     s_flush_disabled = true;
 }
 
 void ui_resume()
 {
+    ESP_LOGW("BLUE_DBG", "===== ui_resume (flush on) =====");
     s_flush_disabled = false;
     // Force full redraw on next LVGL tick
     xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);

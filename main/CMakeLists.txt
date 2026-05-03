@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "main.cpp" "sw_renderer.cpp" "lcd_driver.cpp" "dsi_display.cpp" "esp_lcd_st7123.c"
          "wifi_manager.cpp" "camera_qr.cpp" "dsi_modal.cpp" "sd_storage.cpp"
-         "input_device.cpp" "input_xbox.cpp" "input_gpio.cpp"
+         "input_device.cpp" "input_xbox.cpp" "input_gpio.cpp" "touch_input.cpp"
          "es8388_audio.cpp" "ui_menu.cpp" "i18n.cpp"
          "battery_monitor.cpp" "time_sync.cpp"
          "assets_gen/ui_logo.c"

@@ -8,3 +8,5 @@ dependencies:
   espressif/esp_video: "*"
   espressif/quirc: "*"
   lvgl/lvgl: "~9.2"
+  espressif/esp_lcd_touch_st7123: "*"
+  espressif/esp_lvgl_port: "^2"
