@@ -586,6 +586,14 @@ const uint8_t *SWRenderer::getCostumeRGBA(const std::string &name, int &w, int &
     return it->second.rgba;
 }
 
+float SWRenderer::getCostumeRasterMul(const std::string &name) const {
+    auto it = costumes.find(name);
+    if (it == costumes.end()) return 1.0f;
+    bool isSvg = (name.size() > 4 && name.substr(name.size() - 4) == ".svg");
+    int bmRes = it->second.bitmapResolution > 0 ? it->second.bitmapResolution : 1;
+    return it->second.decodeScale * (isSvg ? 1.0f : (float)bmRes);
+}
+
 void SWRenderer::drawSprite(const std::string &costumeMd5ext, float x, float y,
                             float direction, float size, bool visible,
                             float ghostEffect, float brightnessEffect,

@@ -14,6 +14,16 @@ extern "C" __attribute__((weak)) const uint8_t *render_get_costume_rgba(const ch
     return nullptr;
 }
 
+// Companion callback for render_get_costume_rgba: returns raster_pixels /
+// logical_pixels. Defaults to 1.0 so non-headless platforms (where raster ==
+// logical) keep working unchanged. Headless renderers that downscale SVGs or
+// honour bitmapResolution=2 must override this; otherwise the bitmask's
+// rotation center lands in the wrong cell and collision shifts.
+extern "C" __attribute__((weak)) float render_get_costume_decode_scale(const char *name) {
+    (void)name;
+    return 1.0f;
+}
+
 std::shared_ptr<Bitmask> collision::generateBitmask(Sprite *sprite, unsigned int scaleFactor) {
     const auto &costume = sprite->costumes[sprite->currentCostume];
 
@@ -32,7 +42,11 @@ std::shared_ptr<Bitmask> collision::generateBitmask(Sprite *sprite, unsigned int
             imgData.height = rh;
             imgData.pixels = const_cast<uint8_t *>(rgba);
             imgData.pitch = rw * 4;
-            imgData.scale = 1;
+            // raster_size / logical_size. <1 for downscaled SVGs, ==bitmap-
+            // Resolution for PNG. Drives bitmask scaleFactor so the rotation
+            // center (in logical coords) maps to the correct cell.
+            imgData.scale = render_get_costume_decode_scale(costume.fullName.c_str());
+            if (imgData.scale <= 0.0f) imgData.scale = 1.0f;
             imgDataValid = true;
         }
     }

@@ -114,6 +114,11 @@ public:
     // Returns nullptr if not loaded.
     const uint8_t *getCostumeRGBA(const std::string &name, int &w, int &h) const;
 
+    // raster_pixels / logical_pixels for a costume. SVG downscale + bitmap-
+    // resolution=2 push raster off from logical; collision needs this so the
+    // bitmask scaleFactor matches the rotation-center coords.
+    float getCostumeRasterMul(const std::string &name) const;
+
     // Encode framebuffer as JPEG, returns malloc'd buffer (caller must free)
     uint8_t *encodeJpeg(int quality, int *outSize);
 

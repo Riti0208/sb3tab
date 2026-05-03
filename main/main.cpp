@@ -316,6 +316,16 @@ extern "C" const uint8_t *render_get_costume_rgba(const char *name, int *w, int 
     return renderer->getCostumeRGBA(name, *w, *h);
 }
 
+// Tells collision how raster pixels relate to logical pixels for this costume.
+// SVGs that exceed the raster cap are downscaled (decodeScale<1), and PNG
+// bitmapResolution=2 costumes have raster=2× logical — both push raster off
+// from logical. Bitmask scaleFactor needs this so the rotation center lands
+// on the right cell; otherwise collision queries return shifted results.
+extern "C" float render_get_costume_decode_scale(const char *name) {
+    if (!renderer || !name) return 1.0f;
+    return renderer->getCostumeRasterMul(name);
+}
+
 extern "C" {
 int collision_g_call_count();
 int collision_g_cache_hit();
