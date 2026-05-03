@@ -1443,29 +1443,6 @@ extern "C" void app_main(void)
         }
     }
 
-    // Autorun bootstrap: if no autorun.txt exists yet, look for a saved game
-    // whose name contains "Grillin" and write its ID. One-shot convenience
-    // for the current debug cycle so the user doesn't need to pull the SD
-    // card out to seed the file. Remove this block once the diagnostic
-    // session for that project is done.
-    {
-        char existing[32] = {};
-        if (!sd_load_autorun(existing, sizeof(existing))) {
-            SdGameList glist;
-            sd_list_games(&glist);
-            for (int i = 0; i < glist.count; i++) {
-                if (strstr(glist.entries[i].name, "Grillin") ||
-                    strstr(glist.entries[i].name, "grillin") ||
-                    strstr(glist.entries[i].name, "GRILLIN")) {
-                    ESP_LOGW(TAG, "AUTORUN BOOTSTRAP: matched '%s' (id=%s)",
-                             glist.entries[i].name, glist.entries[i].project_id);
-                    sd_save_autorun(glist.entries[i].project_id);
-                    break;
-                }
-            }
-        }
-    }
-
     // Autorun: if /sd/autorun.txt holds a saved project ID, skip the menu and
     // launch that project. After it exits, the main loop comes back here and
     // relaunches the same project — useful for log-iteration ("flash + reboot
