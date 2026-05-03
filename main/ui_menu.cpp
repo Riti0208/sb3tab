@@ -190,7 +190,8 @@ static volatile bool s_flush_disabled = false;
 // interactive widget" set, populated only by buttons/sliders/dropdowns
 // added during screen build.
 static void ui_indev_clicked_cb(lv_event_t *e) {
-    if (s_flush_disabled) return;  // game/camera owns the screen
+    // No s_flush_disabled guard needed: the indev read callbacks bail when
+    // the menu is suspended, so LVGL never resolves a click in that state.
     if (!s_group) return;
     lv_obj_t *target = (lv_obj_t *)lv_event_get_param(e);
     if (!target) return;
@@ -323,6 +324,13 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 
 static void lvgl_pointer_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
+    // While the game/camera owns the screen, freeze LVGL's view of the touch
+    // panel — otherwise taps would still resolve clicks on the suspended menu
+    // (firing focus/click callbacks that chirp UI sfx and shuffle focus).
+    if (s_flush_disabled) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
     touch_raw_t t;
     if (!touch_input_get_raw(&t)) {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -353,6 +361,16 @@ static int s_dbg_cnt = 0;
 
 static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
+    // While the game/camera owns the screen, don't translate gamepad input
+    // into LVGL keypad events. Otherwise D-pad would shuffle focus on the
+    // suspended menu (chirping the cursor sfx) and A would fire CLICKED on
+    // whatever was last focused, both at gameplay's input rate.
+    if (s_flush_disabled) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->key = 0;
+        return;
+    }
+
     InputDev::State gs = InputDev::get();
     uint32_t b = gs.buttons;
 
@@ -2195,6 +2213,12 @@ bool ui_show_exit_confirm()
 
     s_confirm_overlay = false;
     s_flush_disabled = was_disabled;
+    // The dialog filled the whole DPI FB, but the runtime only repaints the
+    // central 960x720 stage region — without this clear, the top/bottom hint
+    // bars stay visible in the pillarbox strips after dismissal.
+    if (was_disabled) {
+        dsi_clear_both_fbs(s_panel);
+    }
     return result;
 }
 
@@ -2227,6 +2251,9 @@ void ui_show_button_map()
 
     s_confirm_overlay = false;
     s_flush_disabled = was_disabled;
+    if (was_disabled) {
+        dsi_clear_both_fbs(s_panel);
+    }
 }
 
 // ============================================================
