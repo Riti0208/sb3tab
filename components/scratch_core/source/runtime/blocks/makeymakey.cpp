@@ -2,9 +2,9 @@
 #include <input.hpp>
 #include <sprite.hpp>
 
-SCRATCH_BLOCK_NOP(makemakey, whenMakeyKeyPressed)
+SCRATCH_BLOCK_NOP(makeymakey, whenMakeyKeyPressed)
 
-SCRATCH_BLOCK(makemakey, whenCodePressed) {
+SCRATCH_BLOCK(makeymakey, whenCodePressed) {
     if (Input::codePressedBlockOpcodes.find(block.id) != Input::codePressedBlockOpcodes.end()) return BlockResult::RETURN;
     std::string input = Scratch::getInputValue(block, "SEQUENCE", sprite).asString();
     std::vector<std::string> keySequence;
