@@ -65,19 +65,29 @@ static void load_ui_sounds() {
                                      cancel_wav_end - cancel_wav_start);
 }
 
-// True between when the user presses a nav direction and when LVGL processes
-// the resulting focus change. Used so the focus_cb only chirps on real
-// user-driven moves — programmatic focus during screen build stays silent.
-static volatile bool s_user_nav_pending = false;
-
+// Cursor sfx fires on keypad-driven focus changes only. Touch is excluded
+// because LVGL moves focus on pointer-press *before* dispatching the click —
+// without this filter every tap would chirp cursor+select together. The
+// touch tap's feedback is the select sound from ui_indev_clicked_cb.
+//
+// lv_indev_active() is also nullptr for programmatic focus (screen build,
+// lv_group_focus_obj), which keeps screen transitions silent.
+//
+// 50ms debounce guards against the d-pad auto-repeat firing the focus_cb
+// faster than the WAV can play.
 static void ui_group_focus_cb(lv_group_t * /*group*/) {
-    // s_user_nav_pending is set strictly by indev_read_cb whenever a nav
-    // direction is held this poll, so we don't clear it here — auto-repeat
-    // navigation needs the flag to stay true across consecutive focus moves.
-    if (s_user_nav_pending) {
-        SoundPlayer::playSound("ui_cursor");
-    }
+    lv_indev_t *act = lv_indev_active();
+    if (act == nullptr) return;
+    if (lv_indev_get_type(act) != LV_INDEV_TYPE_KEYPAD) return;
+
+    static uint32_t s_last_cursor_ms = 0;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now - s_last_cursor_ms < 50) return;
+    s_last_cursor_ms = now;
+
+    SoundPlayer::playSound("ui_cursor");
 }
+
 
 // Pick the closest pre-baked Montserrat font for a desired pixel size.
 // Used as a fallback for the JP TTF (NotoSansJP subset doesn't include LV_SYMBOL_*
@@ -169,6 +179,29 @@ static SemaphoreHandle_t s_lvgl_mutex = nullptr;
 
 // When true, LVGL flush is a no-op (camera/game owns DPI FB)
 static volatile bool s_flush_disabled = false;
+
+// Fires for both keypad ENTER and touch tap (LVGL routes both through
+// LV_EVENT_CLICKED). The indev's send_event passes the actually-clicked
+// widget as the event param.
+//
+// We can't use LV_OBJ_FLAG_CLICKABLE alone — lv_obj_create() screens have
+// it set by default, so background taps would chirp. Instead, require the
+// target to be in the focus group: that's the canonical "this is a real
+// interactive widget" set, populated only by buttons/sliders/dropdowns
+// added during screen build.
+static void ui_indev_clicked_cb(lv_event_t *e) {
+    if (s_flush_disabled) return;  // game/camera owns the screen
+    if (!s_group) return;
+    lv_obj_t *target = (lv_obj_t *)lv_event_get_param(e);
+    if (!target) return;
+    uint32_t cnt = lv_group_get_obj_count(s_group);
+    for (uint32_t i = 0; i < cnt; i++) {
+        if (lv_group_get_obj_by_index(s_group, i) == target) {
+            SoundPlayer::playSound("ui_select");
+            return;
+        }
+    }
+}
 
 // Menu state
 static MenuState s_state = MenuState::MAIN_MENU;
@@ -426,32 +459,12 @@ static void lvgl_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         }
     }
 
-    // UI sound triggers — only when LVGL UI is actually on screen.
-    // - Cursor: handled separately via lv_group_set_focus_cb (s_user_nav_pending
-    //   flag distinguishes user-driven focus changes from programmatic ones).
-    // - Select: rising edge of A. Almost always activates something.
-    // - Cancel: explicit calls at the actual "go back" code paths, not here —
-    //   pressing B on the main menu (no back target) shouldn't make a sound.
-    static uint32_t s_prev_btn = 0;
-    uint32_t edge = b & ~s_prev_btn;
-    if (!s_flush_disabled) {
-        constexpr uint32_t NAV_MASK = InputDev::DPAD_UP | InputDev::DPAD_DOWN
-                                    | InputDev::DPAD_LEFT | InputDev::DPAD_RIGHT;
-        bool nav_held = (b & NAV_MASK) != 0
-                     || std::abs(gs.lx) > 16000 || std::abs(gs.ly) > 16000;
-        // Strict: only true while a nav direction is actually held *this poll*.
-        // Programmatic focus changes (screen build, lv_group_focus_obj) happen
-        // when nothing is held → focus_cb sees flag=false → stays silent.
-        s_user_nav_pending = nav_held;
-        // Select only when something focusable is actually receiving the press —
-        // loading/status screens have no focused widget, so they stay silent.
-        if ((edge & InputDev::A) && s_group && lv_group_get_focused(s_group)) {
-            SoundPlayer::playSound("ui_select");
-        }
-    } else {
-        s_user_nav_pending = false;
-    }
-    s_prev_btn = b;
+    // UI sound triggers live elsewhere now:
+    // - Cursor:  ui_group_focus_cb (gated by lv_indev_active + 50ms debounce
+    //            so touch scroll doesn't machine-gun the sound).
+    // - Select:  ui_indev_clicked_cb attached to both keypad + touch indevs,
+    //            so LV_EVENT_CLICKED handles A-press AND tap with one path.
+    // - Cancel:  explicit calls at the actual "go back" code paths.
 }
 
 // ============================================================
@@ -1820,12 +1833,17 @@ void ui_init(esp_lcd_panel_handle_t panel)
     lv_indev_set_read_cb(s_indev_touch, lvgl_pointer_read_cb);
     lv_indev_set_display(s_indev_touch, s_disp);
 
+    // Single sfx path for both A-press and touch tap. LVGL's indev pipeline
+    // emits LV_EVENT_CLICKED on each indev whenever a click resolves.
+    lv_indev_add_event_cb(s_indev,       ui_indev_clicked_cb, LV_EVENT_CLICKED, nullptr);
+    lv_indev_add_event_cb(s_indev_touch, ui_indev_clicked_cb, LV_EVENT_CLICKED, nullptr);
+
     // Default group for all focusable widgets
     s_group = lv_group_create();
     lv_group_set_default(s_group);
     // Default: PREV/NEXT navigate, ENTER enters edit mode for sliders
     lv_indev_set_group(s_indev, s_group);
-    // Cursor sfx fires here on every focus move — gated by s_user_nav_pending
+    // Cursor sfx fires on focus moves; gated on lv_indev_active + 50ms debounce.
     lv_group_set_focus_cb(s_group, ui_group_focus_cb);
 
     // Mutex for LVGL thread safety
