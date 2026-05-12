@@ -53,17 +53,30 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 
 ### USB gamepad compatibility
 
-| Controller | Status |
-|---|---|
-| **Xbox 360** wired | ✅ Verified on hardware |
-| **Sony DualShock 4** (PID 0x05C4 / 0x09CC) | ✅ Verified on hardware |
-| **Sony DualSense** (PID 0x0CE6) | ⚠️ Code path landed, not yet bench-tested |
-| Generic USB HID gamepad (class 0x03/0x00/0x00) | ⚠️ Descriptor-parsed at open; not yet bench-tested |
-| **Xbox One / Series** wired | ❌ GIP power-on packet only — full handshake (auth + capabilities + hello) not implemented |
-| **Nintendo Switch Pro Controller** | ❌ Crashes ESP-IDF v5.4.1's USB host stack during enumeration (`spinlock_acquire` assertion); upstream issue |
-| **GP2040-CE** firmware pads (any mode) | ❌ Reliably reboots the device during enumeration; needs investigation |
-| Xbox Wireless Adapter dongle | ❌ Proprietary Microsoft RF protocol — wired pads only |
-| Bluetooth gamepads of any flavour | ❌ Needs a BT stack on the ESP32-C6 co-processor |
+Plug a wired USB gamepad into the Tab5's USB-A port. Driver paths that have
+been bench-tested:
+
+- ✅ **Xbox 360 wired**
+- ✅ **Sony DualShock 4** (PID 0x05C4 / 0x09CC)
+
+Driver paths that are in the code but still waiting on hardware verification:
+
+- **Sony DualSense** (PID 0x0CE6)
+- **Generic USB HID gamepad** (interface class 0x03 / sub 0x00 / proto 0x00) —
+  HID Report Descriptor is parsed at open time, so most plain "DirectInput /
+  HID" pads should enumerate
+
+Known incompatibilities (please don't open issues for these unless you have a
+fix in hand):
+
+- **Nintendo Switch Pro Controller** — its enumeration trips a `spinlock_acquire`
+  assertion inside ESP-IDF v5.4.1's USB host stack and reboots the device. The
+  bug is upstream of sb3tab.
+- **Xbox One / Series wired** — the GIP power-on packet is sent but the full
+  handshake (authentication, capabilities, hello) is not implemented, so the
+  pad never starts streaming reports.
+- **Bluetooth** of any kind — needs a BT stack on the ESP32-C6 co-processor,
+  which isn't wired up yet.
 
 ### Not yet implemented (runtime)
 
