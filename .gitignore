@@ -10,3 +10,10 @@ __pycache__/
 tools/project.sb3
 tools/project_qr.png
 tools/wifi_qr.png
+tools/s3_lcd_test/build/
+tools/s3_lcd_test/sdkconfig
+tools/s3_lcd_test/sdkconfig.old
+tools/s3_lcd_test/managed_components/
+generated/
+*.bak
+*.bak.png
