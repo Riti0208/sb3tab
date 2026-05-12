@@ -112,19 +112,31 @@ idf.py -p /dev/tty.usbmodem1101 flash monitor
 
 ## 使い方
 
+> **初回起動前に**: microSD カードを Tab5 に挿してください。sb3tab は
+> WiFi 認証情報 (`/sd/wifi.txt`)、各種設定 (`/sd/brightness.txt`,
+> `/sd/volume.txt`, `/sd/lang.txt`)、ダウンロードしたプロジェクト
+> (`/sd/games/<id>/`) を書き込みます。FAT32 または exFAT、フォーマット
+> 済みのもの — sb3tab は自動フォーマットしません。
+
 ### 方法 A — QR コードワークフロー（Tab5 推奨）
 
-1. WiFi 用 QR を [Chrome 拡張](tools/chrome-extension/) または CLI で生成:
-   ```bash
-   python3 tools/gen_qr.py wifi "MySSID" "MyPassword"
-   ```
-2. scratch.mit.edu のプロジェクト ID から QR を生成:
-   ```bash
-   python3 tools/gen_qr.py project 1296865674
-   ```
-3. 本体のメニューから QR スキャナを起動:
-   - WiFi QR → 認証情報を `/sd/wifi.txt` に保存
-   - プロジェクト QR → Scratch CDN からアセットを `/sd/games/<id>/` にストリーミング保存して即実行
+QR の生成方法は 2 つあり、どちらでも OK:
+
+- **Chrome 拡張**（開いてる Scratch プロジェクトページを自動検出） —
+  インストールと使い方は
+  [`tools/chrome-extension/README.md`](tools/chrome-extension/README.md)
+  参照。WiFi QR + プロジェクト QR どちらも生成可能
+- **CLI**:
+  ```bash
+  python3 tools/gen_qr.py wifi "MySSID" "MyPassword"
+  python3 tools/gen_qr.py project 1296865674
+  ```
+
+その後、本体のメインメニューから QR スキャナを起動:
+
+- WiFi QR → 認証情報を `/sd/wifi.txt` に保存
+- プロジェクト QR → Scratch CDN からアセットを `/sd/games/<id>/` に
+  ストリーミング保存して即実行
 
 ### 方法 B — USB テザリング（M5Stamp P4 / S3 ボード）
 

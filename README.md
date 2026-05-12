@@ -113,19 +113,30 @@ idf.py -p /dev/tty.usbmodem1101 flash monitor
 
 ## Usage
 
+> **Before first run:** insert a microSD card into the Tab5. sb3tab needs
+> writable storage for WiFi credentials (`/sd/wifi.txt`), settings
+> (`/sd/brightness.txt`, `/sd/volume.txt`, `/sd/lang.txt`), and downloaded
+> projects (`/sd/games/<id>/`). FAT32 or exFAT, formatted by the Tab5 or
+> a host — sb3tab does not auto-format.
+
 ### Option A — QR-code workflow (recommended on Tab5)
 
-1. Generate a WiFi QR with the [Chrome extension](tools/chrome-extension/) or the CLI:
-   ```bash
-   python3 tools/gen_qr.py wifi "MySSID" "MyPassword"
-   ```
-2. Generate a project QR from a scratch.mit.edu project ID:
-   ```bash
-   python3 tools/gen_qr.py project 1296865674
-   ```
-3. On the device, open the QR scanner from the menu.
-   - WiFi QR → credentials saved to `/sd/wifi.txt`
-   - Project QR → project + assets streamed from the Scratch CDN to `/sd/games/<id>/`, then run
+Two ways to produce the QR codes — pick whichever is more convenient:
+
+- **Chrome extension** (auto-detects the Scratch project page you're on):
+  see [`tools/chrome-extension/README.md`](tools/chrome-extension/README.md)
+  for installation and use. The extension does WiFi QR + project QR.
+- **CLI**:
+  ```bash
+  python3 tools/gen_qr.py wifi "MySSID" "MyPassword"
+  python3 tools/gen_qr.py project 1296865674
+  ```
+
+Then on the device, open the QR scanner from the main menu:
+
+- WiFi QR → credentials saved to `/sd/wifi.txt`
+- Project QR → project + assets streamed from the Scratch CDN to
+  `/sd/games/<id>/`, then run
 
 ### Option B — USB tether (M5Stamp P4 / S3 boards)
 
