@@ -30,7 +30,7 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 - **34 fps average** on M5Stack Tab5 (5" 720x1280 MIPI DSI), measured on an 11-sprite + 10-clone project
 - **Scan a QR code → download from scratch.mit.edu → run** — fully standalone after first WiFi setup
 - **Onboard sound** via the Tab5 ES8388 codec (WAV + MP3, pitch/pan effects)
-- **Touch + Xbox 360 USB gamepad input** with auto-mapping from project key bindings
+- **Touch + USB gamepad input** (Xbox 360, Xbox One/Series, DualShock 4, DualSense, generic HID) with auto-mapping from project key bindings
 - **Japanese text** in speech bubbles and monitors (NotoSansJP, JIS X 0208 Level 1)
 - Boot splash, main menu, settings UI, on-device QR scanner, and SD card persistence
 
@@ -48,7 +48,7 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 | Sound playback | ✅ WAV + MP3, pitch/pan |
 | Clones | ✅ |
 | Motion / control / operator / data blocks | ✅ |
-| Keyboard input via touch on-screen / GPIO buttons / Xbox 360 pad | ✅ |
+| Keyboard input via touch on-screen / GPIO buttons / USB gamepad | ✅ |
 | Rotation styles (LEFT_RIGHT, NONE, ALL_AROUND) | ✅ |
 
 ### Not yet implemented
@@ -56,7 +56,8 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 - Graphic effects: COLOR, FISHEYE, WHIRL, PIXELATE, MOSAIC (not in upstream ScratchEverywhere)
 - Ogg audio
 - Text-to-Speech and translation blocks
-- Xbox One / Xbox Wireless Adapter (only Xbox 360 wired pads are recognised)
+- Xbox Wireless Adapter dongle (uses Microsoft's proprietary RF protocol — only wired pads are supported)
+- Bluetooth gamepads (requires a BT stack on the ESP32-C6 co-processor; not yet wired up)
 
 ## Hardware
 
@@ -70,7 +71,7 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 | Audio | ES8388 I²S codec + onboard speaker |
 | Camera | SC202CS MIPI CSI (used for QR scanning) |
 | Storage | SD card (FAT) for projects + WiFi credentials |
-| Input | Touch, GPIO buttons, USB-A host (Xbox 360 wired pads) |
+| Input | Touch, GPIO buttons, USB-A host (Xbox 360 / Xbox One / DS4 / DualSense / HID gamepads) |
 
 The slave firmware for the onboard ESP32-C6 lives in [`slave/`](slave/) (vendored from `esp_hosted`).
 
@@ -148,7 +149,7 @@ The host extracts the `.sb3` (miniz inflate crashes on P4 RISC-V) and streams `p
 │  │  • UI menu, settings, modals           │  │
 │  │  • WiFi (esp_hosted), SD, time sync    │  │
 │  │  • Camera + quirc QR decode            │  │
-│  │  • Touch / GPIO / Xbox 360 input       │  │
+│  │  • Touch / GPIO / USB gamepad input    │  │
 │  │  • ES8388 audio                        │  │
 │  └────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘

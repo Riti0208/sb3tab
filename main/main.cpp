@@ -42,7 +42,7 @@
 #include "dsi_modal.h"
 #include "sd_storage.h"
 #include "input_device.h"
-#include "input_xbox.h"
+#include "input_usb.h"
 #include "input_gpio.h"
 #include "touch_input.h"
 #include "es8388_audio.h"
@@ -1412,7 +1412,7 @@ extern "C" void app_main(void)
 #endif
 
     vTaskDelay(pdMS_TO_TICKS(500));
-    input_xbox_init();
+    input_usb_init();
     input_gpio_init();
     touch_input_init();
     sd_init();
