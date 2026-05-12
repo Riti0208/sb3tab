@@ -53,30 +53,18 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 
 ### USB gamepad compatibility
 
-Plug a wired USB gamepad into the Tab5's USB-A port. Driver paths that have
-been bench-tested:
+Plug a wired USB gamepad into the Tab5's USB-A port.
 
-- ✅ **Xbox 360 wired**
-- ✅ **Sony DualShock 4** (PID 0x05C4 / 0x09CC)
+**Bench-verified:**
 
-Driver paths that are in the code but still waiting on hardware verification:
+- Xbox 360 wired
+- Sony DualShock 4 (PID 0x05C4 / 0x09CC)
 
-- **Sony DualSense** (PID 0x0CE6)
-- **Generic USB HID gamepad** (interface class 0x03 / sub 0x00 / proto 0x00) —
-  HID Report Descriptor is parsed at open time, so most plain "DirectInput /
-  HID" pads should enumerate
-
-Known incompatibilities (please don't open issues for these unless you have a
-fix in hand):
-
-- **Nintendo Switch Pro Controller** — its enumeration trips a `spinlock_acquire`
-  assertion inside ESP-IDF v5.4.1's USB host stack and reboots the device. The
-  bug is upstream of sb3tab.
-- **Xbox One / Series wired** — the GIP power-on packet is sent but the full
-  handshake (authentication, capabilities, hello) is not implemented, so the
-  pad never starts streaming reports.
-- **Bluetooth** of any kind — needs a BT stack on the ESP32-C6 co-processor,
-  which isn't wired up yet.
+**Coded but not yet hardware-verified:** Sony DualSense (PID 0x0CE6), Xbox
+One / Series wired (partial GIP handshake), and generic USB HID gamepads
+(interface class 0x03 / sub 0x00 / proto 0x00). The HID Report Descriptor
+is parsed at open time, so most plain "DirectInput / HID" pads should
+enumerate.
 
 ### Not yet implemented (runtime)
 
