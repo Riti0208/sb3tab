@@ -1,8 +1,10 @@
-# ScratchESP
+# sb3tab
 
-[Scratch](https://scratch.mit.edu/) プロジェクト（`.sb3`）を ESP32 マイコン上でネイティブ実行 — ブラウザもPCも不要、初回 WiFi 設定後はインターネット接続も不要です。
+Scratch プロジェクト（`.sb3` ファイル形式）を ESP32 マイコン上でネイティブ実行 — ブラウザもPCも不要、初回 WiFi 設定後はインターネット接続も不要です。
 
-[ScratchEverywhere](https://github.com/ScratchEverywhere/ScratchEverywhere)（クロスプラットフォーム Scratch ランタイム）をベースにしています。
+[ScratchEverywhere](https://github.com/ScratchEverywhere/ScratchEverywhere)（クロスプラットフォームの `.sb3` ランタイム）をベースにしています。
+
+> `sb3tab` は独立した OSS プロジェクトです。Scratch Foundation / MIT による**公式プロジェクトでも、提携・後援を受けたものでもありません**。
 
 ## ハイライト
 
@@ -182,4 +184,14 @@ docs/                UI モックアップ
 
 ## ライセンス
 
-GPL-3.0（ScratchEverywhere から継承）。
+`sb3tab` は **LGPL-3.0-or-later** で配布されます。LGPL v3 / GPL v3 の全文は
+[LICENSE](./LICENSE)、同梱しているサードパーティのソフトウェア・フォント等の
+帰属表示は [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) を参照してください。
+
+### 商標について
+
+**Scratch** は Scratch Foundation の商標です。本プロジェクトは `.sb3` ファイル
+形式を nominative fair use の範囲で取り扱うものであり、製品名に "Scratch" を
+含めていません。**ESP32** / **ESP-IDF** は Espressif Systems の商標、
+**M5Stack** / **M5Tab5** / **M5Stamp** は M5Stack Technology Co., Ltd. の
+商標です。その他の商標はすべて各所有者に帰属します。

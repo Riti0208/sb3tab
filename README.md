@@ -1,10 +1,12 @@
-# ScratchESP
+# sb3tab
 
 [**日本語版 README はこちら**](README.ja.md)
 
-Run [Scratch](https://scratch.mit.edu/) projects (`.sb3`) natively on ESP32 microcontrollers — no browser, no PC, no internet required at runtime.
+Run Scratch projects (`.sb3` file format) natively on ESP32 microcontrollers — no browser, no PC, no internet required at runtime.
 
-Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/ScratchEverywhere), a cross-platform Scratch runtime.
+Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/ScratchEverywhere), a cross-platform `.sb3` runtime.
+
+> `sb3tab` is an independent open-source project and is **not affiliated with, endorsed by, or sponsored by** the Scratch Foundation or MIT.
 
 ## Highlights
 
@@ -184,4 +186,15 @@ docs/                UI mockups
 
 ## License
 
-GPL-3.0 (inherited from ScratchEverywhere).
+`sb3tab` is licensed under **LGPL-3.0-or-later**. See [LICENSE](./LICENSE) for
+the full GNU LGPL v3 / GPL v3 texts, and [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md)
+for a complete inventory of bundled third-party software, fonts, and
+attribution notices.
+
+### Trademarks
+
+**Scratch** is a trademark of the Scratch Foundation. This project plays back
+`.sb3` files under nominative fair use and does not use "Scratch" as part of
+its product name. **ESP32** / **ESP-IDF** are trademarks of Espressif Systems.
+**M5Stack** / **M5Tab5** / **M5Stamp** are trademarks of M5Stack Technology
+Co., Ltd. All other trademarks belong to their respective owners.
