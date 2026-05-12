@@ -1,4 +1,4 @@
-# ESP32-P4 ScratchESP / M5Stack Tab5 configuration
+# ESP32-P4 sb3tab / M5Stack Tab5 configuration
 CONFIG_IDF_TARGET="esp32p4"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -82,6 +82,23 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # LVGL Tiny TTF (for Japanese game titles in menu)
 CONFIG_LV_USE_TINY_TTF=y
 CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT=256
+
+# Bump LVGL's internal pool from 64KB → 128KB. Tiny TTF rasterizes
+# Japanese glyphs on demand; a few menu screens worth of unique kanji
+# (e.g. localised game titles loaded from /sd/games/) blow past 64KB,
+# asserting in stbtt__new_active with no clean way to recover. The pool
+# lives in BSS so we can't push it arbitrarily without starving the
+# internal SRAM regions used by .sbss; 128KB is the sweet spot that fits
+# the linker budget on ESP32-P4 while doubling the previous headroom.
+CONFIG_LV_MEM_SIZE_KILOBYTES=128
+
+# LVGL Montserrat font sizes used by ui_menu.cpp::montserrat_for()
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
 
 # LVGL PNG decoder (for embedded logo + tile icons)
 CONFIG_LV_USE_LODEPNG=y
