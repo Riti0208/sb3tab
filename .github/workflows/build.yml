@@ -1,0 +1,37 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-tab5:
+    name: Build (ESP32-P4, Tab5)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build sb3tab firmware with ESP-IDF v5.4.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.4.1
+          target: esp32p4
+          path: '.'
+          command: idf.py build
+
+      - name: Upload firmware artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb3tab-tab5-firmware
+          path: |
+            build/sb3tab.bin
+            build/sb3tab.elf
+            build/sb3tab.map
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+          if-no-files-found: warn
+          retention-days: 14

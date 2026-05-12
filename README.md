@@ -1,6 +1,23 @@
 # sb3tab
 
+<p align="center">
+  <img src="main/assets/logo.png" alt="sb3tab logo" width="420">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: LGPL-3.0-or-later" src="https://img.shields.io/badge/License-LGPL--3.0--or--later-blue.svg"></a>
+  <a href="https://github.com/Riti0208/sb3tab/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Riti0208/sb3tab/actions/workflows/build.yml/badge.svg"></a>
+  <img alt="Target" src="https://img.shields.io/badge/target-ESP32--P4-orange">
+</p>
+
 [**日本語版 README はこちら**](README.ja.md)
+
+<!-- TODO: replace with a real demo GIF / video showing QR scan → download → run -->
+<!--
+<p align="center">
+  <img src="docs/demo.gif" alt="sb3tab running a Scratch project on M5Stack Tab5" width="540">
+</p>
+-->
 
 Run Scratch projects (`.sb3` file format) natively on ESP32 microcontrollers — no browser, no PC, no internet required at runtime.
 
@@ -170,7 +187,6 @@ tools/
   chrome-extension/  Browser extension for QR generation
   s3_lcd_test/       XIAO S3 + ILI9341 bring-up
   subset_font.py     NotoSansJP subset builder
-docs/                UI mockups
 ```
 
 ## Credits
