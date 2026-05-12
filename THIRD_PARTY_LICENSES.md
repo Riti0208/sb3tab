@@ -1,6 +1,8 @@
 # Third-Party Licenses
 
-`sb3tab` is licensed under **LGPL-3.0-or-later** (see [LICENSE](./LICENSE)).
+`sb3tab` is licensed under **LGPL-3.0-or-later** (see [LICENSE](./LICENSE) for
+the GNU Lesser General Public License v3 and [COPYING](./COPYING) for the GNU
+General Public License v3, which LGPL incorporates by reference).
 It bundles or links against the following third-party software, each under its
 own license. Attribution and license notices are preserved here in addition to
 any in-source headers.
