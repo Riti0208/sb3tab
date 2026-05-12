@@ -1,5 +1,7 @@
 # sb3tab QR — Chrome extension
 
+[**日本語版はこちら**](README.ja.md)
+
 Generate the QR codes that sb3tab's on-device scanner reads:
 
 - **WiFi QR** — encodes an SSID + password pair so sb3tab can join your
@@ -25,24 +27,24 @@ The extension isn't published to the Chrome Web Store. Load it manually:
 
 ## Use
 
-### Add a WiFi network to the device
+### Load a Scratch project (the everyday flow)
+
+1. Open the project page on
+   `https://scratch.mit.edu/projects/<id>` in a browser tab.
+2. Click the extension's toolbar icon. The popup opens on the
+   **Project** tab and picks up the current page automatically.
+3. Scan the generated QR with sb3tab. The runtime downloads
+   `project.json` plus every asset to `/sd/games/<id>/` and starts the
+   project as soon as the transfer finishes.
+
+### Add a WiFi network to the device (one-time setup)
 
 1. Click the extension's toolbar icon.
-2. Stay on the **WiFi** tab.
+2. Switch to the **WiFi** tab.
 3. Enter your network name and password.
 4. Click **Generate QR** and scan it with sb3tab's on-device QR scanner.
 5. The device joins the network and writes the credentials to
    `/sd/wifi.txt` so it auto-connects on subsequent boots.
-
-### Load a Scratch project
-
-1. Open the project page on
-   `https://scratch.mit.edu/projects/<id>` in a browser tab.
-2. Click the extension's toolbar icon. The **Project** tab picks up the
-   current page automatically.
-3. Scan the generated QR with sb3tab. The runtime downloads
-   `project.json` plus every asset to `/sd/games/<id>/` and starts the
-   project as soon as the transfer finishes.
 
 ## Privacy
 
