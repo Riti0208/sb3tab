@@ -181,11 +181,12 @@ static void free_assets() {
 // screens flashing into a black screen and back.
 static int64_t s_loading_last_us = 0;
 
-// Scratch blue — same shade the modal header uses, so the backdrop and the
-// header read as one continuous block of color with the white card sitting
-// in the middle.
+// Darker Scratch blue (#3373CC) — one step down from the modal header's
+// #4C97FF so the header strip and white card both stand out against the
+// backdrop instead of dissolving into it. Matches the chrome bar palette
+// used by the QR scan / menu screens for a single design language.
 static const uint16_t LOADING_BG_BLUE =
-    (uint16_t)(((0x4C >> 3) << 11) | ((0x97 >> 2) << 5) | (0xFF >> 3));
+    (uint16_t)(((0x33 >> 3) << 11) | ((0x73 >> 2) << 5) | (0xCC >> 3));
 
 static void loading_begin() {
     dsi_modal_set_bg(LOADING_BG_BLUE);
