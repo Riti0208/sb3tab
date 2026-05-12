@@ -4,7 +4,7 @@
 // To use:
 //   1. Set INPUT_GPIO_ENABLE to 1.
 //   2. Fill in s_pins[] with {GPIO number, InputDev::Btn} entries.
-//   3. Call input_gpio_init() from app_main (after input_xbox_init() is fine;
+//   3. Call input_gpio_init() from app_main (after input_usb_init() is fine;
 //      sources are merged regardless of order).
 
 #include "input_gpio.h"
