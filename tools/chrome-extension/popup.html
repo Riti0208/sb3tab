@@ -100,11 +100,11 @@ button#gen-wifi:hover { background: #E67A00; }
 </head>
 <body>
   <div class="tabs">
-    <div class="tab active" data-panel="wifi-panel">WiFi</div>
-    <div class="tab" data-panel="project-panel">Project</div>
+    <div class="tab" data-panel="wifi-panel">WiFi</div>
+    <div class="tab active" data-panel="project-panel">Project</div>
   </div>
 
-  <div id="wifi-panel" class="panel active">
+  <div id="wifi-panel" class="panel">
     <h2>WiFi QR for Tab5</h2>
     <div class="input-group">
       <label>SSID</label>
@@ -119,7 +119,7 @@ button#gen-wifi:hover { background: #E67A00; }
     <div id="wifi-info" class="info"></div>
   </div>
 
-  <div id="project-panel" class="panel">
+  <div id="project-panel" class="panel active">
     <h2>Scratch Project QR</h2>
     <div id="status">Detecting Scratch project...</div>
     <div id="qr-container"></div>

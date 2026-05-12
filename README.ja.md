@@ -113,7 +113,7 @@ idf.py -p /dev/tty.usbmodem1101 flash monitor
 > (`/sd/games/<id>/`) を書き込みます。FAT32 または exFAT、フォーマット
 > 済みのもの — sb3tab は自動フォーマットしません。
 
-QR は [Scratcher QR Chrome 拡張](tools/chrome-extension/README.md) で生成
+QR は [sb3tab QR Chrome 拡張](tools/chrome-extension/README.md) で生成
 します。開いてる Scratch プロジェクトページを自動検出し、WiFi QR も同じ
 拡張で作れます。
 

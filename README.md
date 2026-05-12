@@ -115,7 +115,7 @@ idf.py -p /dev/tty.usbmodem1101 flash monitor
 > a host — sb3tab does not auto-format.
 
 Generate the QR codes with the
-[Scratcher QR Chrome extension](tools/chrome-extension/README.md). The
+[sb3tab QR Chrome extension](tools/chrome-extension/README.md). The
 extension auto-detects the Scratch project page you currently have open,
 and also handles WiFi QR generation.
 

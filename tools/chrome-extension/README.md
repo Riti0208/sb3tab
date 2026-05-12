@@ -1,4 +1,4 @@
-# Scratcher QR — Chrome extension
+# sb3tab QR — Chrome extension
 
 Generate the QR codes that sb3tab's on-device scanner reads:
 
@@ -21,7 +21,7 @@ The extension isn't published to the Chrome Web Store. Load it manually:
 2. Toggle **Developer mode** on (top-right).
 3. Click **Load unpacked**.
 4. Pick this `tools/chrome-extension/` directory.
-5. Pin the **Scratcher QR** action so it's reachable from the toolbar.
+5. Pin the **sb3tab QR** action so it's reachable from the toolbar.
 
 ## Use
 

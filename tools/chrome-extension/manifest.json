@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Scratcher QR",
+  "name": "sb3tab QR",
   "version": "1.0",
-  "description": "Generate QR code for Scratch projects to load on ESP32-P4 Tab5",
+  "description": "Generate QR codes (WiFi + Scratch project) for sb3tab on M5Stack Tab5 (ESP32-P4)",
   "permissions": ["activeTab", "storage"],
   "action": {
     "default_popup": "popup.html",
