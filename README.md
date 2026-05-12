@@ -56,11 +56,12 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 | Controller | Status |
 |---|---|
 | **Xbox 360** wired | ✅ Verified on hardware |
-| **Sony DualShock 4** (PID 0x05C4 / 0x09CC) | ⚠️ Code path landed, not yet bench-tested |
+| **Sony DualShock 4** (PID 0x05C4 / 0x09CC) | ✅ Verified on hardware |
 | **Sony DualSense** (PID 0x0CE6) | ⚠️ Code path landed, not yet bench-tested |
-| Generic USB HID gamepad (class 0x03/0x00/0x00) | ⚠️ Descriptor-parsed at open; tested in emulation only |
+| Generic USB HID gamepad (class 0x03/0x00/0x00) | ⚠️ Descriptor-parsed at open; not yet bench-tested |
 | **Xbox One / Series** wired | ❌ GIP power-on packet only — full handshake (auth + capabilities + hello) not implemented |
 | **Nintendo Switch Pro Controller** | ❌ Crashes ESP-IDF v5.4.1's USB host stack during enumeration (`spinlock_acquire` assertion); upstream issue |
+| **GP2040-CE** firmware pads (any mode) | ❌ Reliably reboots the device during enumeration; needs investigation |
 | Xbox Wireless Adapter dongle | ❌ Proprietary Microsoft RF protocol — wired pads only |
 | Bluetooth gamepads of any flavour | ❌ Needs a BT stack on the ESP32-C6 co-processor |
 
