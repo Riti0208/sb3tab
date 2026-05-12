@@ -88,11 +88,6 @@ enumerate.
 
 The slave firmware for the onboard ESP32-C6 lives in [`slave/`](slave/) (vendored from `esp_hosted`).
 
-### Also tested
-
-- **M5Stamp ESP32-P4** + ILI9341 SPI LCD (320x240) — minimal bring-up board
-- **XIAO ESP32-S3 Sense** + ILI9341 — earlier validation target
-
 ## Build
 
 ### Requirements
@@ -119,18 +114,10 @@ idf.py -p /dev/tty.usbmodem1101 flash monitor
 > projects (`/sd/games/<id>/`). FAT32 or exFAT, formatted by the Tab5 or
 > a host — sb3tab does not auto-format.
 
-### Option A — QR-code workflow (recommended on Tab5)
-
-Two ways to produce the QR codes — pick whichever is more convenient:
-
-- **Chrome extension** (auto-detects the Scratch project page you're on):
-  see [`tools/chrome-extension/README.md`](tools/chrome-extension/README.md)
-  for installation and use. The extension does WiFi QR + project QR.
-- **CLI**:
-  ```bash
-  python3 tools/gen_qr.py wifi "MySSID" "MyPassword"
-  python3 tools/gen_qr.py project 1296865674
-  ```
+Generate the QR codes with the
+[Scratcher QR Chrome extension](tools/chrome-extension/README.md). The
+extension auto-detects the Scratch project page you currently have open,
+and also handles WiFi QR generation.
 
 Then on the device, open the QR scanner from the main menu:
 
@@ -138,21 +125,12 @@ Then on the device, open the QR scanner from the main menu:
 - Project QR → project + assets streamed from the Scratch CDN to
   `/sd/games/<id>/`, then run
 
-### Option B — USB tether (M5Stamp P4 / S3 boards)
-
-```bash
-python3 -u tools/send_sb3.py <project.sb3 or scratch.mit.edu URL> /dev/tty.usbmodem1101
-```
-
-The host extracts the `.sb3` (miniz inflate crashes on P4 RISC-V) and streams `project.json` + each asset over USB serial. The runtime starts as soon as `START` arrives.
-
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────┐
 │  Source                                      │
 │  • QR (camera) — scratch.mit.edu over WiFi   │
-│  • USB serial — host-extracted .sb3          │
 │  • SD card    — previously downloaded games  │
 └──────────────────────┬───────────────────────┘
                        │
@@ -207,10 +185,8 @@ components/
   scratch_core/      Scratch runtime (vendored ScratchEverywhere fork)
 slave/               ESP32-C6 esp_hosted slave firmware
 tools/
-  send_sb3.py        Host-side .sb3 extractor + USB streamer
-  gen_qr.py          WiFi / project QR generator
   chrome-extension/  Browser extension for QR generation
-  s3_lcd_test/       XIAO S3 + ILI9341 bring-up
+  gen_qr.py          CLI QR generator (developer convenience)
   subset_font.py     NotoSansJP subset builder
 ```
 
