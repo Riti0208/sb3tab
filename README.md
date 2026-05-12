@@ -51,13 +51,24 @@ Built on top of [ScratchEverywhere](https://github.com/ScratchEverywhere/Scratch
 | Keyboard input via touch on-screen / GPIO buttons / USB gamepad | ✅ |
 | Rotation styles (LEFT_RIGHT, NONE, ALL_AROUND) | ✅ |
 
-### Not yet implemented
+### USB gamepad compatibility
+
+| Controller | Status |
+|---|---|
+| **Xbox 360** wired | ✅ Verified on hardware |
+| **Sony DualShock 4** (PID 0x05C4 / 0x09CC) | ⚠️ Code path landed, not yet bench-tested |
+| **Sony DualSense** (PID 0x0CE6) | ⚠️ Code path landed, not yet bench-tested |
+| Generic USB HID gamepad (class 0x03/0x00/0x00) | ⚠️ Descriptor-parsed at open; tested in emulation only |
+| **Xbox One / Series** wired | ❌ GIP power-on packet only — full handshake (auth + capabilities + hello) not implemented |
+| **Nintendo Switch Pro Controller** | ❌ Crashes ESP-IDF v5.4.1's USB host stack during enumeration (`spinlock_acquire` assertion); upstream issue |
+| Xbox Wireless Adapter dongle | ❌ Proprietary Microsoft RF protocol — wired pads only |
+| Bluetooth gamepads of any flavour | ❌ Needs a BT stack on the ESP32-C6 co-processor |
+
+### Not yet implemented (runtime)
 
 - Graphic effects: COLOR, FISHEYE, WHIRL, PIXELATE, MOSAIC (not in upstream ScratchEverywhere)
 - Ogg audio
 - Text-to-Speech and translation blocks
-- Xbox Wireless Adapter dongle (uses Microsoft's proprietary RF protocol — only wired pads are supported)
-- Bluetooth gamepads (requires a BT stack on the ESP32-C6 co-processor; not yet wired up)
 
 ## Hardware
 
