@@ -936,7 +936,7 @@ static void build_main_menu()
     s_scr_main = lv_obj_create(nullptr);
     lv_obj_add_style(s_scr_main, &s_style_bg, 0);
 
-    // Logo image (replaces "ScratchESP" text — 512x128 RGB565A8)
+    // Logo image (sb3tab wordmark — 512x128 RGB565A8)
     lv_obj_t *logo = lv_image_create(s_scr_main);
     lv_image_set_src(logo, &ui_logo);
     lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 76);
